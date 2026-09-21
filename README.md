@@ -31,6 +31,14 @@ uv pip install -e ".[dev]"
 python -m pytest -m "not network"        # offline tests pass (123)
 ```
 
+Verified public install (pinned to the v0.1.0 release; sdist + wheel served as release assets):
+
+```bash
+uv pip install "nano-mcp @ git+https://github.com/PANDeveloper001/nano-mcp-public.git@v0.1.0"
+python -c "import nano_mcp, nano_sdk; print('nano_mcp OK')"
+```
+
+
 Use the SDK to derive a wallet and read a balance:
 
 ```python
