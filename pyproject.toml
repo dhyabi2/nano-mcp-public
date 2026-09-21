@@ -3,6 +3,7 @@ name = "nano-mcp"
 version = "0.1.0"
 description = "MCP server + SDK so any AI agent can hold XNO (Nano) and pay per API call, transacting through rpc.nano.to."
 readme = "README.md"
+license = {text = "MIT"}
 requires-python = ">=3.10"
 dependencies = [
     "httpx>=0.24",
