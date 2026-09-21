@@ -22,3 +22,21 @@
   by x402 Doctor when it is served through a tunnel that answers browser User-Agents with 200. Both are
   written up in `openai-agents-nano-x402/docs/upstream-x402-nano-registration.md` with the
   `tunnel_ua_probe.py` reproducer.
+
+## 2026-09-21 ~09:45 UTC — distribution run: release + first listing milestone
+
+- **GitHub release v0.1.0 created** (https://github.com/PANDeveloper001/nano-mcp-public/releases/tag/v0.1.0)
+  with sdist + wheel uploaded as release assets. Both assets re-downloaded over the public URL and
+  sha256-matched the local build (tar e92c0ba6…, whl 35f542fb…); installed the pinned
+  `git+…@v0.1.0` in a fresh venv and both `nano_mcp` and `nano_sdk` import. Verified public 200 signed-out.
+  This is the keyless "must be published" bar for directory/registry listing; PyPI still needs the
+  customer's one-time pending-trusted-publisher registration.
+- **First ADOPTION MILESTONE recorded**: Glama auto-indexed nano-mcp from the GitHub README
+  (`glama.ai/mcp/servers/PANDeveloper001/nano-mcp-public`) — verified rendered + 200 signed-out;
+  recorded via `rai-scope adopted --kind listing`.
+- **README** now documents the verified tag-pinned install (`uv pip install "nano-mcp @ git+…@v0.1.0"`).
+- Evaluated not-submitted: aiagentsdirectory.com/submit-agent is Sign-In-gated (not keyless — its
+  `/api/agents/submit-by-url` returns 500); mcp.so free path exposes no review-submit CTA (only a $39
+  paid auto-publish) — both skipped honestly, nothing falsely logged as a submission.
+- Next: mcp.so auto-index on its own schedule; official MCP registry stays blocked on PyPI pending
+  publisher; weekly X post slot opens 2026-09-22 10:39 UTC.
