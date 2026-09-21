@@ -40,3 +40,7 @@
   paid auto-publish) — both skipped honestly, nothing falsely logged as a submission.
 - Next: mcp.so auto-index on its own schedule; official MCP registry stays blocked on PyPI pending
   publisher; weekly X post slot opens 2026-09-22 10:39 UTC.
+
+## Run 22 (2026-09-21): LICENSE hardening
+- Added MIT LICENSE + pyproject license field. API license flipped null->MIT (verified raw 200). Logged as docs.
+- MCP Registry still blocked: pypi/json 404 for nano-mcp (req1 customer pending-trusted-publisher). GLAMA + GH release live.
