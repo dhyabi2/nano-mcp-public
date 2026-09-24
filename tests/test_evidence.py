@@ -11,8 +11,18 @@ import os
 import sys
 import time
 
+import pytest
+
 sys.path.insert(0, "/root/.hermes/plugins/nano-pulse")
-import journal as journal_mod  # noqa: E402
+try:
+    import journal as journal_mod  # noqa: E402
+except ModuleNotFoundError:  # pragma: no cover - not part of this release
+    # The nano-pulse journal plugin lives on the swarm's own boxes and is in neither this
+    # repository nor its dependencies. pytest treats a collection error as fatal, so importing it
+    # unconditionally did not fail these three modules - it aborted the whole run, and the 111
+    # tests that pass offline never ran for anyone who installed the package.
+    pytest.skip("the nano-pulse journal plugin is not part of this release",
+                allow_module_level=True)
 
 from nano_mcp import append_nano_tx, should_log  # noqa: E402
 
