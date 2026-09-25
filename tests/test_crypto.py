@@ -106,3 +106,31 @@ def test_units_roundtrip():
 def test_units_reject_overflow_precision():
     with pytest.raises(ValueError):
         nano_to_raw("0." + "0" * 29 + "123456")  # more than 30 decimals
+
+
+# A whole-XNO balance in raw carries 31 significant digits, three more than the
+# 28 that Decimal arithmetic keeps by default. Multiplying or dividing by 10**30
+# therefore rounds real balances.
+FULL_PRECISION_RAW = [
+    3141592653589793238462643383279,  # ~3.14 XNO
+    9999999999999999999999999999999,  # one raw short of 10 XNO
+    10**30 + 1,                       # 1 XNO + 1 raw
+]
+
+
+@pytest.mark.parametrize("raw", FULL_PRECISION_RAW)
+def test_raw_to_nano_is_exact_for_full_precision_balances(raw):
+    assert nano_to_raw(raw_to_nano(raw)) == raw
+
+
+@pytest.mark.parametrize("raw", FULL_PRECISION_RAW)
+def test_nano_str_never_rounds_a_balance(raw):
+    # Rounding up here would report more XNO than the account holds.
+    digits = str(raw).rjust(31, "0")
+    expected = f"{digits[:-30]}.{digits[-30:]}".rstrip("0").rstrip(".")
+    assert nano_str(raw) == expected
+
+
+def test_nano_to_raw_accepts_a_full_30_decimal_amount():
+    amount = "1.000000000000000000000000000001"  # 1 XNO + 1 raw, exactly representable
+    assert nano_to_raw(amount) == 10**30 + 1
