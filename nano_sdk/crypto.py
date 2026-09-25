@@ -71,10 +71,14 @@ def public_key_from_address(address: str) -> bytes:
     """
     if not ADDRESS_RE.match(address):
         raise ValueError("malformed nano/xrb address")
-    body = address[5:]
+    # Split on the separator, never on a fixed offset: the legacy prefix "xrb_"
+    # is one character shorter than "nano_", so address[5:] ate the first
+    # character of an xrb_ address's body.
+    body = address.split("_", 1)[1]
     pub_n = _b32_decode(body[:52])
     ck_n = _b32_decode(body[52:])
-    assert pub_n < (1 << 256), "public key field wider than 256 bits"
+    if pub_n >= (1 << 256):
+        raise ValueError("public key field wider than 256 bits")
     pub = pub_n.to_bytes(32, "big")
     if ck_n.to_bytes(5, "big") != checksum(pub):
         raise ValueError("address checksum mismatch (possible typo)")
