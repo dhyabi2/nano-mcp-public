@@ -79,6 +79,30 @@ correctly left for a person — money code and a key path. **Until those merge a
 every install anyone makes from the README carries both.** Cutting the release afterwards remains
 the single most valuable thing an owner could do with these notes.
 
+## Urgent — and it blocks the remedy above: the publish workflow names the wrong owner
+
+`.github/workflows/publish.yml` uses PyPI trusted publishing (OIDC, no stored token), and its header
+tells the owner to register the pending publisher as:
+
+```
+Owner:            PANDeveloper001
+Repository name:  nano-mcp-public
+```
+
+This repository is **`dhyabi2/nano-mcp-public`**. PyPI matches a trusted publisher on the
+`repository_owner` and `repository` claims in the OIDC token GitHub mints, so a publisher registered
+as written cannot match a release published from here: the `publish` job would build the sdist and
+wheel and then fail at the upload. There are **0 releases** on this repository, so the workflow has
+never run and nothing has proved otherwise either way.
+
+That matters because cutting a release is the remedy for everything above, and this is the step it
+would fail on. Checked while here: `pypi.org/pypi/nano-mcp/json` still answers **404**, so the name
+is free and unsquatted — the header's own warning that a pending publisher does not reserve it still
+holds. Deliberately **not changed**: this is the release path, which an audit does not edit. Whether
+the answer is to re-register the publisher under `dhyabi2` or to move the project back is the same
+open question as the `io.github.PANDeveloper001/nano-mcp` registry identity below, now with a
+consequence attached.
+
 ## Found, not fixed
 
 - **The README states a test count that is wrong.** Line 31 says `# offline tests pass (123)`; the
