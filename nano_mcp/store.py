@@ -32,14 +32,48 @@ CREATE TABLE IF NOT EXISTS quote_expiry (
 """
 
 
+# Where the store used to default to: beside the installed package. Kept as a name so an existing
+# deployment can still be found, and so the law that this is no longer the default can point at it.
+_PACKAGE_DB = os.path.join(os.path.dirname(os.path.abspath(__file__)), "approvals.db")
+
+
+def default_store_path() -> str:
+    """Where the approvals database lives when the caller does not name a path.
+
+    It used to be `_PACKAGE_DB` - inside the installed package - which is the one directory an
+    installed application must not write to. On a system-wide install, a distro package, or a
+    container image built as root and run as a non-root user (the ordinary hardened pattern),
+    site-packages is not writable by the process, so constructing the store raised
+
+        sqlite3.OperationalError: unable to open database file
+
+    and the MCP server could not start at all. Nothing in the suite saw it: every test passes an
+    explicit `path`, so this branch was only ever taken in production.
+
+    Order of precedence, and why:
+      1. NANO_MCP_STORE, so an operator can always say where the record goes;
+      2. an existing `_PACKAGE_DB`, so a deployment already running keeps its approvals - losing
+         them would make every already-approved request_id claimable a second time, which is the
+         one property this store exists to provide;
+      3. $XDG_STATE_HOME/nano-mcp (else ~/.local/state/nano-mcp), which is writable by the user the
+         server runs as and survives reinstalling the package.
+    """
+    env = os.environ.get("NANO_MCP_STORE")
+    if env:
+        return env
+    if os.path.exists(_PACKAGE_DB):
+        return _PACKAGE_DB
+    base = os.environ.get("XDG_STATE_HOME") or os.path.join(os.path.expanduser("~"), ".local", "state")
+    directory = os.path.join(base, "nano-mcp")
+    os.makedirs(directory, exist_ok=True)
+    return os.path.join(directory, "approvals.db")
+
+
 class ApprovalStore:
     """Persistent exactly-once record of approved request_ids."""
 
     def __init__(self, path: str | None = None):
-        # default: a store next to the package so approvals survive restarts.
-        self.path = path or os.path.join(
-            os.path.dirname(os.path.abspath(__file__)), "approvals.db"
-        )
+        self.path = path or default_store_path()
         self._lock = threading.Lock()
         self._conn = sqlite3.connect(self.path, check_same_thread=False)
         self._conn.executescript(SCHEMA)
