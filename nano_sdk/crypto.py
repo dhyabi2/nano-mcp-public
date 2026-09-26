@@ -21,7 +21,11 @@ import ed25519_blake2b
 
 NANO_ALPHABET = "13456789abcdefghijkmnopqrstuwxyz"
 _ALPHABET_INDEX = {c: i for i, c in enumerate(NANO_ALPHABET)}
-ADDRESS_RE = re.compile(r"^(nano|xrb)_[13][13456789abcdefghijkmnopqrstuwxyz]{59}$")
+# Anchored with \Z, not $: in Python "$" also matches immediately before a
+# trailing newline, so "nano_<60 chars>\n" matched and then reached the base32
+# decoder, which raised KeyError('\n') out of functions documented to raise
+# ValueError / return a bool. A trailing newline is malformed, not valid.
+ADDRESS_RE = re.compile(r"\A(nano|xrb)_[13][13456789abcdefghijkmnopqrstuwxyz]{59}\Z")
 
 
 def _b32_fixedwidth(value: int, ndigits: int) -> str:

@@ -118,3 +118,30 @@ not what an installer gets either way (see below): `#3` units precision (money c
 - **The MCP registry identity**, deliberately untouched and unchanged from 09-24: `server.json.mcpregistry`
   and the `<!-- mcp-name: io.github.PANDeveloper001/nano-mcp -->` marker still name `PANDeveloper001`,
   which is how the registry proves who owns the entry. A publishing decision for a person.
+
+## Addendum, same day — a second defect, raised separately and left open
+
+**An address with a trailing newline crashes the decoder with `KeyError` instead of being refused.**
+`crypto.py:24` anchors `ADDRESS_RE` with `$`, and in Python `$` also matches immediately before a
+trailing newline, so `"nano_<60 chars>\n"` passes the regex and `_b32_decode` then reaches the `"\n"`,
+which is not in the Nano alphabet. Measured on `main`:
+
+```
+validate_address(addr)        -> True
+validate_address(addr + "\n") -> RAISED KeyError('\n')
+```
+
+`public_key_from_address` is documented to raise `ValueError` on a malformed address and
+`validate_address` to return a bool catching only `ValueError`, so the `KeyError` escapes both — the
+same contract violation the 09-24 sibling audit fixed on this function when an `AssertionError` was
+escaping it. A trailing newline is the ordinary shape of an address read from a file or a config, and
+`Wallet.send` validates its destination through this path.
+
+Found while auditing `dhyabi2/nano-mcp`, whose `crypto.py` carries the identical line; the fix is
+raised in both repositories and **left open in both**, because `crypto.py` is the address/key path
+that these runs do not self-merge. The change is one anchor (`$` → `\Z`) and accepts nothing it did
+not accept before, pinned by a second test over 25 derived accounts. Offline suite here: 116 → 118.
+
+The `xrb_` half of that path is deliberately untouched by it — the fixed-offset slice is pull request
+`#4`, still open — so the new test exercises `nano_` addresses only. `#3`, `#4` and this one all want
+reviewing together, and a release cut afterwards.
