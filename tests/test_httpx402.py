@@ -310,3 +310,22 @@ def test_bad_payment_signature_encoding_is_400(stack):
     _app, client, _payer = stack
     resp = client.get("/", headers={PAYMENT_SIGNATURE_HEADER: "not-base64!!!"})
     assert resp.status_code == 400
+
+def test_payment_signature_that_is_valid_json_but_not_an_object_is_400(stack):
+    """A payment-signature whose base64 decodes to well-formed JSON that is not
+    an object must be answered 400, not drop the connection.
+
+    `complete()` reads `payload.get("accepted")`, so a bare number or `null`
+    used to raise AttributeError inside do_GET; BaseHTTPRequestHandler has no
+    handler for that, so the client got no response at all.
+    """
+    _app, client, _payer = stack
+    for encoded in ("MTIz", "bnVsbA==", "WzEsMl0="):  # 123, null, [1,2]
+        resp = client.get("/", headers={PAYMENT_SIGNATURE_HEADER: encoded})
+        assert resp.status_code == 400, f"{encoded!r} -> {resp.status_code}"
+
+
+def test_b64decode_json_refuses_a_non_object():
+    for encoded in ("MTIz", "bnVsbA==", "WzEsMl0=", "ImEi"):  # 123, null, [1,2], "a"
+        with pytest.raises(ValueError):
+            b64decode_json(encoded)

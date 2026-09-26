@@ -348,3 +348,19 @@ def test_parse_raw_handles_raw_and_decimal():
     assert parse_raw("1") == 1
     assert parse_raw("1.5") == 15 * 10**29
     assert parse_raw("") == 0
+
+def test_post_body_that_is_valid_json_but_not_an_object_is_400(live_fac):
+    """A /verify or /settle body that is well-formed JSON but not an object must
+    be answered 400, not drop the connection.
+
+    do_POST reads `body.get("requirements")`, so a bare number, string or list
+    used to raise AttributeError outside the handler's try/except and the client
+    got no response at all.
+    """
+    _, client = live_fac
+    for path in ("/verify", "/settle"):
+        for raw in (b"123", b'"x"', b"[1,2]", b"null"):
+            r = client.post(
+                path, content=raw, headers={"Content-Type": "application/json"}
+            )
+            assert r.status_code == 400, f"{path} {raw!r} -> {r.status_code}"

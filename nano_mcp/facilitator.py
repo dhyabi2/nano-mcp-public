@@ -495,7 +495,13 @@ def make_handler(facilitator: Facilitator) -> type[BaseHTTPRequestHandler]:
             length = int(self.headers.get("Content-Length") or 0)
             if length == 0:
                 return {}
-            return json.loads(self.rfile.read(length).decode("utf-8"))
+            obj = json.loads(self.rfile.read(length).decode("utf-8"))
+            if not isinstance(obj, dict):
+                # do_POST reads `requirements`/`payload` off this with .get(),
+                # so a bare number, string, list or null must be refused here
+                # and answered 400 rather than raise inside the handler.
+                raise ValueError("body must be a JSON object")
+            return obj
 
         def do_GET(self) -> None:  # noqa: N802
             if urlparse(self.path).path == "/supported":

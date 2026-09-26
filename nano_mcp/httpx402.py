@@ -65,11 +65,20 @@ def b64encode_json(obj: dict) -> str:
 
 def b64decode_json(value: str) -> dict:
     """Decode a base64 PAYMENT-* header into its JSON object, tolerant to both
-    standard and URL-safe alphabets and to missing padding."""
+    standard and URL-safe alphabets and to missing padding.
+
+    A header that decodes to well-formed JSON which is not an object (a bare
+    number, string, list or null) is rejected here rather than handed on: every
+    caller goes straight to `.get()`, so a non-object would raise AttributeError
+    inside the request handler and drop the connection instead of answering 400.
+    """
     s = value.strip()
     s = s.replace("-", "+").replace("_", "/")
     s += "=" * (-len(s) % 4)
-    return json.loads(base64.b64decode(s.encode("ascii")))
+    obj = json.loads(base64.b64decode(s.encode("ascii")))
+    if not isinstance(obj, dict):
+        raise ValueError("PAYMENT-* header must decode to a JSON object")
+    return obj
 
 
 def payment_required_obj(
