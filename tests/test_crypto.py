@@ -68,6 +68,26 @@ def test_address_decoding_and_checksum(pub_hex, addr):
     assert validate_address(addr)
 
 
+@pytest.mark.parametrize("pub_hex,addr", NODE_PAIRS)
+def test_legacy_xrb_prefix_decodes_to_the_same_key(pub_hex, addr):
+    # ADDRESS_RE accepts the legacy "xrb_" prefix, so decoding must accept it too.
+    # "xrb_" is one character shorter than "nano_"; slicing the body at a fixed
+    # offset dropped its first character and made every xrb_ address unusable.
+    legacy = "xrb_" + addr.split("_", 1)[1]
+    assert public_key_from_address(legacy).hex().upper() == pub_hex
+    assert validate_address(legacy) is True
+
+
+def test_validate_address_never_raises_on_regex_matching_input():
+    # validate_address is documented to return a bool, and it only catches
+    # ValueError; an AssertionError escaped it for xrb_ input because the
+    # mis-sliced body decoded to more than 256 bits.
+    legacy = "xrb_" + NODE_PAIRS[0][1].split("_", 1)[1]
+    tampered = legacy[:-1] + ("1" if legacy[-1] != "1" else "3")
+    assert validate_address(legacy) is True
+    assert validate_address(tampered) is False
+
+
 def test_validate_rejects_bad_checksum():
     good = NODE_PAIRS[0][1]
     tampered = good[:-1] + ("1" if good[-1] != "1" else "3")
