@@ -118,3 +118,62 @@ not what an installer gets either way (see below): `#3` units precision (money c
 - **The MCP registry identity**, deliberately untouched and unchanged from 09-24: `server.json.mcpregistry`
   and the `<!-- mcp-name: io.github.PANDeveloper001/nano-mcp -->` marker still name `PANDeveloper001`,
   which is how the registry proves who owns the entry. A publishing decision for a person.
+
+## Addendum, same day — a second defect, raised separately and left open
+
+**An address with a trailing newline crashes the decoder with `KeyError` instead of being refused.**
+`crypto.py:24` anchors `ADDRESS_RE` with `$`, and in Python `$` also matches immediately before a
+trailing newline, so `"nano_<60 chars>\n"` passes the regex and `_b32_decode` then reaches the `"\n"`,
+which is not in the Nano alphabet. Measured on `main`:
+
+```
+validate_address(addr)        -> True
+validate_address(addr + "\n") -> RAISED KeyError('\n')
+```
+
+`public_key_from_address` is documented to raise `ValueError` on a malformed address and
+`validate_address` to return a bool catching only `ValueError`, so the `KeyError` escapes both — the
+same contract violation the 09-24 sibling audit fixed on this function when an `AssertionError` was
+escaping it. A trailing newline is the ordinary shape of an address read from a file or a config, and
+`Wallet.send` validates its destination through this path.
+
+Found while auditing `dhyabi2/nano-mcp`, whose `crypto.py` carries the identical line; the fix is
+raised in both repositories and **left open in both**, because `crypto.py` is the address/key path
+that these runs do not self-merge. The change is one anchor (`$` → `\Z`) and accepts nothing it did
+not accept before, pinned by a second test over 25 derived accounts. Offline suite here: 116 → 118.
+
+The `xrb_` half of that path is deliberately untouched by it — the fixed-offset slice is pull request
+`#4`, still open — so the new test exercises `nano_` addresses only. `#3`, `#4` and this one all want
+reviewing together, and a release cut afterwards.
+
+## Second addendum — base merged again, and a count this branch had to correct
+
+`main` moved again, from `8a9030d` to `4398ab4`: the other audit session merged `#9` (the declared `mcp`
+floor could not import this package) and `#10` (the advertised offline test count was five short of the
+suite), and wrote its note at `audits/nano-mcp-public-2026-09-27.md` — a different date, so no collision
+this time.
+
+**Git reported no conflict, and merging anyway would have turned the suite red.** `#10` did not merely
+correct a number in the README; it added `tests/test_readme.py::test_the_offline_test_count_in_the_quickstart_is_the_count_pytest_collects`,
+which runs `pytest --collect-only` and asserts the README's stated count equals what is actually
+collected. This branch adds two tests. So on the merged tree, before any correction:
+
+```
+E  AssertionError: the README says 120 offline tests, pytest collects 122
+E  assert 120 == 122
+tests/test_readme.py:76: AssertionError
+1 failed, 120 passed, 4 skipped, 6 deselected
+```
+
+A textually clean merge that breaks a law is the reason the merged tree gets run rather than trusted.
+The number this branch changes is this branch's to carry, so the quickstart line moved from
+`# 120 offline tests collected; 119 pass, 1 skips without a live node` to `# 122 … 121 pass, 1 skips`.
+Nothing else of `#10`'s work was touched, and the law it added now passes against the real count rather
+than being edited around.
+
+After, in a clean venv on the merged tree: **121 passed, 4 skipped, 6 deselected**, `tests/test_readme.py`
+3 passed, this branch's two crypto tests pass, and `#9`/`#10`'s five new tests pass.
+
+Worth recording for the next run: a law that pins a count in prose makes every future pull request that
+adds a test responsible for updating that prose. That is the right trade — the alternative is a README
+that drifts — but it means a clean `git merge` is no longer evidence that a branch is safe here.

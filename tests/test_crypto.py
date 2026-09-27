@@ -154,3 +154,44 @@ def test_nano_str_never_rounds_a_balance(raw):
 def test_nano_to_raw_accepts_a_full_30_decimal_amount():
     amount = "1.000000000000000000000000000001"  # 1 XNO + 1 raw, exactly representable
     assert nano_to_raw(amount) == 10**30 + 1
+
+
+def test_an_address_with_a_trailing_newline_is_malformed_not_a_crash():
+    """`$` in a Python regex also matches just before a trailing newline, so
+    "nano_<60 chars>\\n" matched ADDRESS_RE, reached the base32 decoder and raised
+    KeyError('\\n') — out of `public_key_from_address`, documented to raise
+    ValueError, and out of `validate_address`, documented to return a bool.
+
+    A trailing newline is the ordinary shape of an address read from a file or a
+    config, and `Wallet.send` validates its destination through this path, so the
+    caller got a KeyError instead of "invalid destination".
+
+    Both prefixes are exercised: the legacy `xrb_` prefix decodes correctly since
+    the fixed-offset slice in `public_key_from_address` was replaced (#4), so it
+    must be refused with the same trailing newline too.
+    """
+    addr = derive_account(DOCS_SEED).address
+    assert validate_address(addr) is True
+
+    assert validate_address(addr + "\n") is False
+    with pytest.raises(ValueError):
+        public_key_from_address(addr + "\n")
+
+    # the same for the other whitespace a reader leaves behind
+    for suffix in ("\r\n", "\r", " ", "\t", "\n\n"):
+        assert validate_address(addr + suffix) is False
+
+    legacy = "xrb_" + addr.split("_", 1)[1]
+    assert validate_address(legacy) is True
+    assert validate_address(legacy + "\n") is False
+    with pytest.raises(ValueError):
+        public_key_from_address(legacy + "\n")
+
+
+def test_the_newline_guard_does_not_change_any_valid_address():
+    """The anchor change must refuse only the malformed tail: every address the
+    library itself produces still decodes to the key it was built from."""
+    for i in range(25):
+        acct = derive_account(DOCS_SEED, i)
+        assert validate_address(acct.address) is True
+        assert public_key_from_address(acct.address) == acct.public_key
