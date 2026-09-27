@@ -111,6 +111,15 @@ consequence attached.
   broke something. Left alone because a bare count in prose rots by design and the honest repair is
   to drop it rather than re-state it, which is an editorial call; this repository already has the
   right precedent in `test_the_readme_does_not_promise_release_assets_that_are_not_published`.
+
+  *Resolved on main by another session, 2026-09-27 (`4398ab46`), and it lands on this branch:* the
+  count is now pinned by `test_the_offline_test_count_in_the_quickstart_is_the_count_pytest_collects`,
+  which reads the number from the README and compares it against `--collect-only`. That law is the
+  right answer and it immediately caught this branch: the four laws in `tests/test_store.py` move the
+  collected count from 120 to 124, so merging `main` in turned the suite red with *"the README says
+  120 offline tests, pytest collects 124"*. The README line is corrected here, and the suite is
+  green again at **123 passed, 4 skipped, 6 deselected**. Worth noting as the law working exactly as
+  intended — a prose number that rots is now a test failure rather than a quiet inaccuracy.
 - **`pyproject.toml` declares no `[build-system]`.** PEP 517 consumers fall back to the legacy
   setuptools backend, which is why the install above works, so this is not breaking anything today;
   declaring it is what stops it becoming a build failure on a future toolchain. The sibling
