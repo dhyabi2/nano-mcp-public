@@ -8,7 +8,9 @@ requires-python = ">=3.10"
 dependencies = [
     "httpx>=0.24",
     "ed25519-blake2b-fork>=1.4",
-    "mcp>=1.0",
+    # mcp.server.mcpserver (nano_mcp/server.py, nano_mcp/paidtool.py) first
+    # exists in mcp 2.0; 1.x cannot import this package at all.
+    "mcp>=2.0",
 ]
 
 [project.optional-dependencies]
