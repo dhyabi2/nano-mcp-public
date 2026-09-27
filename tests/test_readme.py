@@ -42,3 +42,37 @@ def test_the_readme_does_not_promise_release_assets_that_are_not_published():
     text = _readme().lower()
     assert "release assets" not in text, (
         "the README promises release assets; publish them or drop the claim")
+
+
+def test_the_offline_test_count_in_the_quickstart_is_the_count_pytest_collects():
+    """The quickstart advertised `# offline tests pass (123)`. The suite collects 120 offline tests,
+    of which 119 pass and one skips without a live node.
+
+    A reader follows the quickstart, sees a different number, and has no way to tell a stale
+    README from five tests they broke. The number is checked against what pytest actually
+    collects under the very selection the README prints, so it cannot drift again:
+
+        $ python -m pytest -q -m "not network" --collect-only
+        120/126 tests collected (6 deselected)
+
+    `--collect-only` is used rather than a real run so this law stays cheap and cannot recurse
+    into itself.
+    """
+    import subprocess
+    import sys
+
+    m = re.search(r"#\s*(\d+)\s+offline tests collected", _readme())
+    assert m, "the quickstart no longer states how many offline tests there are"
+    claimed = int(m.group(1))
+
+    proc = subprocess.run(
+        [sys.executable, "-m", "pytest", "-q", "-m", "not network", "--collect-only",
+         "-p", "no:cacheprovider"],
+        cwd=ROOT, capture_output=True, text=True,
+    )
+    got = re.search(r"(\d+)/\d+ tests collected", proc.stdout)
+    assert got, f"could not read a collection count from pytest:\n{proc.stdout[-2000:]}"
+    collected = int(got.group(1))
+    assert claimed == collected, (
+        f"the README says {claimed} offline tests, pytest collects {collected}"
+    )

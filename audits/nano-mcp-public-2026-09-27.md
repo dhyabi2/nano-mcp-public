@@ -98,12 +98,17 @@ $ python -m pytest -q -m "not network"
   signature digests and the published `docs.nano.org` test vectors, as the 09-25 audit derived. No
   `.env`, `.pem` or `.key` is tracked or in the available history.
 
+## Also fixed, in its own pull request
+
+**The README's test count was wrong.** Line 31 said `# offline tests pass (123)`; the suite collects
+120 offline tests, of which 119 pass and one skips without a live node. A reader who follows the
+quickstart and counts cannot tell a stale README from tests they broke. Corrected, and pinned by a law
+in `tests/test_readme.py` that reads the number out of the README and compares it with what
+`pytest -m "not network" --collect-only` actually collects, so it cannot drift again. Kept separate
+from the dependency bound because it is a separate concern.
+
 ## Found, not fixed
 
-- **The README's test count is wrong.** Line 31 says `# offline tests pass (123)`; the suite reports
-  118 passing after this change (116 before it). A reader who runs the command and counts will think
-  they broke five tests. Left for its own pull request, because it is a separate concern from the
-  dependency bound and the number depends on which one lands first.
 - **`nano_mcp/journaldb.py:61` drops a `payer` that is `None`, and the scorecard then counts that row
   as external.** `read_nano_tx` strips keys whose value is `None`, so a `nano_tx` journal row written
   without a `payer` arrives at `count_external_receipts` with no `payer` at all; `r.get("payer") not

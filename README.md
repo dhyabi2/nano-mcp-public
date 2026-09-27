@@ -28,7 +28,7 @@ NANO_PAYMENT_MASTER_SECRET=$(python3 -c "import os;print(os.urandom(32).hex())")
 # 2. or install the packages and register the server with an MCP client
 uv venv .venv && source .venv/bin/activate
 uv pip install -e ".[dev]"
-python -m pytest -m "not network"        # offline tests pass (123)
+python -m pytest -m "not network"        # 120 offline tests collected; 119 pass, 1 skips without a live node
 ```
 
 Verified public install (pinned to the `v0.1.0` tag):
