@@ -329,3 +329,27 @@ def test_b64decode_json_refuses_a_non_object():
     for encoded in ("MTIz", "bnVsbA==", "WzEsMl0=", "ImEi"):  # 123, null, [1,2], "a"
         with pytest.raises(ValueError):
             b64decode_json(encoded)
+
+
+def test_payment_signature_whose_accepted_is_not_an_object_is_refused(stack):
+    """`accepted` and `accepted.extra` are attacker-supplied too.
+
+    The object-shape check above stops at the top level. `complete()` then
+    called `.get()` on `payload["accepted"]` and on `accepted["extra"]`
+    without checking either is an object, so a header carrying
+    `{"accepted": "x"}` or `{"accepted": {"extra": "x"}}` raised
+    AttributeError inside do_GET -- which BaseHTTPRequestHandler does not
+    handle, so the client got no response at all rather than a 402.
+    """
+    _app, client, _payer = stack
+    for payload in (
+        {"accepted": "zzz"},
+        {"accepted": 1},
+        {"accepted": ["a"]},
+        {"accepted": {"extra": "zzz"}},
+        {"accepted": {"extra": ["a"]}},
+    ):
+        encoded = b64encode_json(payload)
+        resp = client.get("/", headers={PAYMENT_SIGNATURE_HEADER: encoded})
+        assert resp.status_code == 402, f"{payload!r} -> {resp.status_code}"
+        assert "the protected result" not in resp.text
