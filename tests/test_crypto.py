@@ -195,3 +195,44 @@ def test_the_newline_guard_does_not_change_any_valid_address():
         acct = derive_account(DOCS_SEED, i)
         assert validate_address(acct.address) is True
         assert public_key_from_address(acct.address) == acct.public_key
+
+
+def test_address_from_public_key_refuses_a_key_that_is_not_32_bytes():
+    """The encoder took any length and silently emitted a broken address.
+
+    `address_from_public_key` documents "a 32-byte public key" and checked nothing.
+    `_b32_fixedwidth(..., 52)` writes exactly 52 characters whatever the value, so a
+    key that is too long loses its high bytes and one that is too short is
+    zero-extended -- while `checksum()` is taken over the bytes as given. What comes
+    back is 65 characters, starts with `nano_`, holds nothing but alphabet
+    characters, and is not an address. The library's own validator rejects its own
+    encoder's output:
+
+        address_from_public_key(b"\\x11" * 33)  -> 'nano_46aj46aj…ooceg87x'   accepted
+        validate_address(that)                  -> False
+
+    It is a *value*, not an exception, so it reads as an address everywhere a string
+    is displayed, pasted into an invoice or written into a manifest, and the error
+    surfaces at the far end with nothing pointing back at the call that made it.
+
+    64 bytes is what `open(keyfile, "rb").read()` returns for a file holding 64 hex
+    characters; 31 bytes is the ordinary result of trimming leading zero bytes off an
+    integer. `derive_private_key` guards exactly this shape already.
+    """
+    good = bytes.fromhex(DOCS_PUB_EXPAND)
+    assert validate_address(address_from_public_key(good)) is True
+
+    for n in (0, 16, 31, 33, 64):
+        with pytest.raises(ValueError):
+            address_from_public_key(b"\x11" * n)
+
+
+def test_the_length_check_changes_no_address_the_library_produces():
+    """It may only refuse more: every 32-byte key still encodes exactly as before."""
+    assert address_from_public_key(bytes.fromhex(DOCS_PUB_EXPAND)) == DOCS_ADDR_EXPAND
+    for i in range(25):
+        acct = derive_account(DOCS_SEED, i)
+        assert address_from_public_key(acct.public_key) == acct.address
+        # bytearray and memoryview are the same 32 bytes and must still encode
+        assert address_from_public_key(bytearray(acct.public_key)) == acct.address
+        assert address_from_public_key(memoryview(acct.public_key)) == acct.address

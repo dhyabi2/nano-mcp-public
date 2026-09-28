@@ -62,7 +62,16 @@ def checksum(public_key: bytes) -> bytes:
 
 
 def address_from_public_key(public_key: bytes) -> str:
-    """Encode a 32-byte public key into a nano_ address."""
+    """Encode a 32-byte public key into a nano_ address.
+
+    Raises ValueError if the key is not 32 bytes. Without the check the encoder
+    emitted an address anyway: the 52-character field is fixed width, so a longer
+    key lost its high bytes and a shorter one was zero-extended, while the
+    checksum was taken over the bytes as given. The result looked like an address
+    and failed validate_address -- a broken value instead of an error.
+    """
+    if len(public_key) != 32:
+        raise ValueError("public key must be 32 bytes (64 hex chars)")
     return "nano_" + _b32_fixedwidth(int.from_bytes(public_key, "big"), 52) + _b32_fixedwidth(
         int.from_bytes(checksum(public_key), "big"), 8
     )
