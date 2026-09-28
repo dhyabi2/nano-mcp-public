@@ -197,7 +197,22 @@ class ResourceApp:
           {ok: False, error_reason: str, error_message: str, invalid: True}
         """
         accepted = payload.get("accepted") or {}
-        request_id = str((accepted.get("extra") or {}).get("requestId") or "")
+        if not isinstance(accepted, dict):
+            return {
+                "ok": False,
+                "invalid": True,
+                "error_reason": "invalid",
+                "error_message": "payload.accepted must be a JSON object",
+            }
+        extra = accepted.get("extra") or {}
+        if not isinstance(extra, dict):
+            return {
+                "ok": False,
+                "invalid": True,
+                "error_reason": "invalid",
+                "error_message": "payload.accepted.extra must be a JSON object",
+            }
+        request_id = str(extra.get("requestId") or "")
         if not request_id:
             return {
                 "ok": False,
