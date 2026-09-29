@@ -76,3 +76,63 @@ def test_the_offline_test_count_in_the_quickstart_is_the_count_pytest_collects()
     assert claimed == collected, (
         f"the README says {claimed} offline tests, pytest collects {collected}"
     )
+
+
+def test_the_readme_sdk_example_runs():
+    """The quickstart's one Python example must work.
+
+    It read:
+
+        wallet = Wallet(seed=SEED, client=RpcClient())
+        print(wallet.balance())
+
+    `Wallet` has no `balance`. It has `balance_raw(index=0)`. So the first thing
+    a reader runs after installing the package ends in
+
+        AttributeError: 'Wallet' object has no attribute 'balance'
+
+    and there is nothing in the README to tell them whether they mistyped it,
+    installed the wrong version, or hit a bug.
+
+    This law extracts the example from README.md and executes it, so the block
+    cannot drift from the API again. The seed is supplied (the README says to
+    take it from the environment) and `RpcClient` is replaced by a stub, so the
+    law is offline and touches no funds.
+    """
+    import re
+
+    block = re.search(r"```python\n(.*?)```", _readme(), re.S)
+    assert block, "the README no longer shows how to use the SDK"
+    source = block.group(1)
+
+    seen = []
+
+    class StubClient:
+        """Stands in for RpcClient: answers account_info, reaches no network."""
+
+        def account_info(self, account):
+            seen.append(account)
+            return {
+                "balance": "1234000000000000000000000000",
+                "frontier": "AB" * 32,
+                "representative": account,
+            }
+
+        def block_info(self, block_hash):
+            return {}
+
+        def call(self, **payload):
+            raise AssertionError(f"the example must not reach the node: {payload}")
+
+    import nano_sdk
+
+    real = nano_sdk.RpcClient
+    nano_sdk.RpcClient = StubClient
+    try:
+        ns = {"SEED": "00" * 32, "__name__": "readme_example"}
+        exec(compile(source, "README.md#python", "exec"), ns)
+    finally:
+        nano_sdk.RpcClient = real
+
+    # the example really did read a balance through the client, not a stub value
+    assert seen, "the example no longer reads a balance"
