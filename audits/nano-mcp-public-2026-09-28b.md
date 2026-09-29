@@ -123,3 +123,43 @@ the fix above should be reviewed on its own; the fix itself is one `isinstance` 
   not in this release. None of them imports the changed line.
 - The live send and receive paths end to end: they need a funded wallet, and an audit should not move
   money.
+
+## Addendum — base merged 2026-09-29, and the README count was wrong on both sides
+
+While this pull request sat open, `main` moved from `86e470f8` to `25ef5e7f`: **another audit run merged
+#14** (`README: the SDK example called a method the Wallet does not have`), which corrected
+`print(wallet.balance())` to `print(wallet.balance_raw())` in the quickstart, added a law that runs the
+README's example, and wrote its own note at `audits/nano-mcp-public-2026-09-29.md`. That made this
+branch conflict on exactly one line, and the conflict is instructive:
+
+```
+<<<<<<< HEAD
+python -m pytest -m "not network"        # 140 offline tests collected, ...
+=======
+python -m pytest -m "not network"        # 139 offline tests collected, ...
+>>>>>>> origin/main
+```
+
+**Neither number was right after the merge.** #14 added one test (138 -> 139); this branch added two
+(138 -> 140); together the tree holds three more than the original, so the answer is 141. Taking
+either side of the conflict would have left the README stating a number the repository's own law
+contradicts — the failure that law exists to catch, arriving this time through a *merge* rather than an
+edit. Resolved by measuring instead of choosing:
+
+```
+$ python -m pytest -q -m "not network" --collect-only -p no:cacheprovider
+141/147 tests collected (6 deselected)
+```
+
+Everything from #14 is kept as it stands on `main`: the `balance_raw()` example, its new
+`test_the_readme_sdk_example_runs` law, and its audit note. Nothing of theirs was overwritten, and the
+only line this branch contributes to `README.md` is still the count.
+
+Verified on the merged tree, same venv: **140 passed, 4 skipped, 6 deselected** (141 collected plus the
+3 journal-plugin modules that skip at import, which `--collect-only` does not count — which is why the
+README's sentence names both numbers). The two tests from this pull request pass, #14's new law passes,
+and the count law now agrees with the tree.
+
+A second instance of the lesson already in the 09-26b note: two audit runs working one repository on the
+same day collide, and here they collided on a *number* that each had correctly updated for its own
+change. A law that derives the value beat two runs that each restated it.
