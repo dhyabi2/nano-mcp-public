@@ -265,3 +265,40 @@ def test_the_length_check_changes_no_address_the_library_produces():
         # bytearray and memoryview are the same 32 bytes and must still encode
         assert address_from_public_key(bytearray(acct.public_key)) == acct.address
         assert address_from_public_key(memoryview(acct.public_key)) == acct.address
+
+
+# ---- nano_to_raw's documented exception contract (audit 2026-09-30) ----
+#
+# The docstring offers ValueError as the way to refuse a bad amount, and `Decimal(str(amount))`
+# answered anything unconvertible with decimal.InvalidOperation instead -- an ArithmeticError, which
+# `except ValueError` does not catch. `quote(price_nano=...)` in nano_mcp/server.py hands this
+# function whatever the calling agent typed, so that was the ordinary path, not an exotic one.
+
+MALFORMED_AMOUNTS = ["", "abc", "0x10", "not-a-price", "1,5", "--1", None, object()]
+
+# Every spelling this function is meant to accept, with the raw it must return. The second law
+# below re-checks these so the fix above cannot have moved an amount while narrowing an exception:
+# a converter for money may not quietly start answering differently.
+ACCEPTED_AMOUNTS = {
+    "0": 0,
+    "1": 10**30,
+    "0.000001": 10**24,
+    "1e-30": 1,
+    "0.000000000000000000000000000001": 1,
+    "1.000000000000000000000000000001": 10**30 + 1,
+    "  1  ": 10**30,
+    "1E+2": 100 * 10**30,
+}
+
+
+def test_nano_to_raw_refuses_a_malformed_amount_with_value_error():
+    from nano_sdk.units import nano_to_raw as to_raw
+    for bad in MALFORMED_AMOUNTS:
+        with pytest.raises(ValueError):
+            to_raw(bad)
+
+
+def test_nano_to_raw_still_converts_every_accepted_amount_identically():
+    from nano_sdk.units import nano_to_raw as to_raw
+    for text, expected in ACCEPTED_AMOUNTS.items():
+        assert to_raw(text) == expected, text

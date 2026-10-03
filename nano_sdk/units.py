@@ -8,7 +8,7 @@ significant digits -- fewer than the 31 a whole-XNO raw balance carries. So thes
 conversions are done by rescaling the exponent (Decimal's constructor and int() are exact
 and context-free) rather than by multiplying or dividing by 10**30.
 """
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 
 RAW_PER_NANO = Decimal("1000000000000000000000000000000")  # 10**30
 RAW_EXPONENT = 30  # 1 nano = 10**RAW_EXPONENT raw
@@ -24,8 +24,21 @@ def nano_to_raw(amount: str | Decimal | int) -> int:
     """Convert a nano amount (string or Decimal) to integer raw (10**30 scale).
 
     Raises ValueError if the amount has more than 30 decimal places or is negative.
+
+    Malformed input raises ValueError too, which it did not: `Decimal(str(amount))` answers a
+    string that is not a number with `decimal.InvalidOperation`, an ArithmeticError and no kind of
+    ValueError, so `except ValueError` -- the only defence this docstring offers -- did not catch
+    `""`, `"abc"`, `"0x10"` or `None`. The one production caller is the `quote` MCP tool
+    (nano_mcp/server.py), whose `price_nano` is whatever the calling agent typed, so the
+    unconvertible case is the ordinary case, not an exotic one.
+
+    Nothing that converted before converts differently: this only narrows the exception raised
+    where one was already raised.
     """
-    d = Decimal(str(amount))
+    try:
+        d = Decimal(str(amount))
+    except InvalidOperation as exc:
+        raise ValueError(f"amount is not a number: {amount!r}") from exc
     if not d.is_finite():
         raise ValueError("amount must be a finite number")
     if d < 0:
