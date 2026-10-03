@@ -50,9 +50,21 @@ def derive_private_key(seed: bytes | str, index: int = 0) -> bytes:
 
 
 def public_key(private_key: bytes | str) -> bytes:
-    """Derive the 32-byte Ed25519-Blake2b public key from a 32-byte private key."""
+    """Derive the 32-byte Ed25519-Blake2b public key from a 32-byte private key.
+
+    Raises ValueError if the key is not 32 bytes (or 64 hex characters).
+    """
     if isinstance(private_key, str):
         private_key = bytes.fromhex(private_key)
+    # Check the length here rather than leaving it to SigningKey. SigningKey
+    # refuses most wrong lengths, but it also accepts a 64-byte
+    # "seed || verifying key" form and returns bytes 32:64 of it VERBATIM as the
+    # public key. So the 64 ASCII bytes of a hex-text key -- what .encode() gives,
+    # and what open(path, "rb").read() gives for a key file -- were echoed back as
+    # a "public key", yielding a well-formed, checksum-valid address that no
+    # private key can sign for. derive_private_key already guards the same slip.
+    if len(private_key) != 32:
+        raise ValueError("private key must be 32 bytes (64 hex chars)")
     return ed25519_blake2b.SigningKey(private_key).get_verifying_key().to_bytes()
 
 
@@ -62,7 +74,16 @@ def checksum(public_key: bytes) -> bytes:
 
 
 def address_from_public_key(public_key: bytes) -> str:
-    """Encode a 32-byte public key into a nano_ address."""
+    """Encode a 32-byte public key into a nano_ address.
+
+    Raises ValueError if the key is not 32 bytes. Without the check the encoder
+    emitted an address anyway: the 52-character field is fixed width, so a longer
+    key lost its high bytes and a shorter one was zero-extended, while the
+    checksum was taken over the bytes as given. The result looked like an address
+    and failed validate_address -- a broken value instead of an error.
+    """
+    if len(public_key) != 32:
+        raise ValueError("public key must be 32 bytes (64 hex chars)")
     return "nano_" + _b32_fixedwidth(int.from_bytes(public_key, "big"), 52) + _b32_fixedwidth(
         int.from_bytes(checksum(public_key), "big"), 8
     )

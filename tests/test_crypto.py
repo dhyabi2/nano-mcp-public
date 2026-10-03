@@ -195,3 +195,110 @@ def test_the_newline_guard_does_not_change_any_valid_address():
         acct = derive_account(DOCS_SEED, i)
         assert validate_address(acct.address) is True
         assert public_key_from_address(acct.address) == acct.public_key
+
+
+def test_the_ascii_bytes_of_a_hex_key_are_refused_not_silently_accepted():
+    """A 64-byte input is not a 32-byte private key, and must not be treated as one.
+
+    `ed25519_blake2b.SigningKey` also accepts the 64-byte "seed || verifying key"
+    form, in which bytes 32:64 are returned as the public key VERBATIM. So the 64
+    ASCII bytes of a hex-text key -- what `.encode()` gives, and what
+    `open(path, "rb").read()` gives for a key file -- produced a well-formed,
+    checksum-valid address with no private key behind it. Money sent to such an
+    address is unspendable by anyone.
+    """
+    hex_key = "00" * 31 + "01"
+    correct = public_key(bytes.fromhex(hex_key))
+    assert public_key(hex_key) == correct  # the hex-string form is unaffected
+
+    ascii_bytes = hex_key.encode()
+    assert len(ascii_bytes) == 64
+    with pytest.raises(ValueError):
+        public_key(ascii_bytes)
+
+
+def test_public_key_accepts_exactly_32_bytes_and_refuses_every_other_length():
+    """`derive_private_key` already guards its length; this one did not, and 64 was
+    the length that slipped through into a wrong-but-valid-looking address."""
+    assert len(public_key(b"\x01" * 32)) == 32
+    for n in (0, 1, 16, 31, 33, 48, 64, 96):
+        with pytest.raises(ValueError):
+            public_key(b"\x01" * n)
+
+
+def test_address_from_public_key_refuses_a_key_that_is_not_32_bytes():
+    """The encoder took any length and silently emitted a broken address.
+
+    `address_from_public_key` documents "a 32-byte public key" and checked nothing.
+    `_b32_fixedwidth(..., 52)` writes exactly 52 characters whatever the value, so a
+    key that is too long loses its high bytes and one that is too short is
+    zero-extended -- while `checksum()` is taken over the bytes as given. What comes
+    back is 65 characters, starts with `nano_`, holds nothing but alphabet
+    characters, and is not an address. The library's own validator rejects its own
+    encoder's output:
+
+        address_from_public_key(b"\\x11" * 33)  -> 'nano_46aj46aj…ooceg87x'   accepted
+        validate_address(that)                  -> False
+
+    It is a *value*, not an exception, so it reads as an address everywhere a string
+    is displayed, pasted into an invoice or written into a manifest, and the error
+    surfaces at the far end with nothing pointing back at the call that made it.
+
+    64 bytes is what `open(keyfile, "rb").read()` returns for a file holding 64 hex
+    characters; 31 bytes is the ordinary result of trimming leading zero bytes off an
+    integer. `derive_private_key` guards exactly this shape already.
+    """
+    good = bytes.fromhex(DOCS_PUB_EXPAND)
+    assert validate_address(address_from_public_key(good)) is True
+
+    for n in (0, 16, 31, 33, 64):
+        with pytest.raises(ValueError):
+            address_from_public_key(b"\x11" * n)
+
+
+def test_the_length_check_changes_no_address_the_library_produces():
+    """It may only refuse more: every 32-byte key still encodes exactly as before."""
+    assert address_from_public_key(bytes.fromhex(DOCS_PUB_EXPAND)) == DOCS_ADDR_EXPAND
+    for i in range(25):
+        acct = derive_account(DOCS_SEED, i)
+        assert address_from_public_key(acct.public_key) == acct.address
+        # bytearray and memoryview are the same 32 bytes and must still encode
+        assert address_from_public_key(bytearray(acct.public_key)) == acct.address
+        assert address_from_public_key(memoryview(acct.public_key)) == acct.address
+
+
+# ---- nano_to_raw's documented exception contract (audit 2026-09-30) ----
+#
+# The docstring offers ValueError as the way to refuse a bad amount, and `Decimal(str(amount))`
+# answered anything unconvertible with decimal.InvalidOperation instead -- an ArithmeticError, which
+# `except ValueError` does not catch. `quote(price_nano=...)` in nano_mcp/server.py hands this
+# function whatever the calling agent typed, so that was the ordinary path, not an exotic one.
+
+MALFORMED_AMOUNTS = ["", "abc", "0x10", "not-a-price", "1,5", "--1", None, object()]
+
+# Every spelling this function is meant to accept, with the raw it must return. The second law
+# below re-checks these so the fix above cannot have moved an amount while narrowing an exception:
+# a converter for money may not quietly start answering differently.
+ACCEPTED_AMOUNTS = {
+    "0": 0,
+    "1": 10**30,
+    "0.000001": 10**24,
+    "1e-30": 1,
+    "0.000000000000000000000000000001": 1,
+    "1.000000000000000000000000000001": 10**30 + 1,
+    "  1  ": 10**30,
+    "1E+2": 100 * 10**30,
+}
+
+
+def test_nano_to_raw_refuses_a_malformed_amount_with_value_error():
+    from nano_sdk.units import nano_to_raw as to_raw
+    for bad in MALFORMED_AMOUNTS:
+        with pytest.raises(ValueError):
+            to_raw(bad)
+
+
+def test_nano_to_raw_still_converts_every_accepted_amount_identically():
+    from nano_sdk.units import nano_to_raw as to_raw
+    for text, expected in ACCEPTED_AMOUNTS.items():
+        assert to_raw(text) == expected, text

@@ -20,7 +20,8 @@ Sources are callables () -> Decimal so they are injectable for offline tests.
 """
 from __future__ import annotations
 
-from decimal import Decimal, ROUND_CEILING
+from decimal import Decimal
+from fractions import Fraction
 from typing import Callable
 
 import httpx
@@ -94,14 +95,22 @@ def usd_to_xno_raw(price_usd: Decimal, rate_xno_usd: Decimal) -> int:
     (USD per XNO), rounding UP so the seller never under-receives.
 
     raw_xno = ceil(price_usd / rate_xno_usd * 10**30)
+
+    Computed through Fraction, not Decimal arithmetic. Decimal division and
+    multiplication both round to the ACTIVE CONTEXT precision -- 28 significant
+    digits by default, where a raw XNO amount carries 31 -- so the same price at
+    the same rate answered differently depending on `decimal.getcontext().prec`,
+    a process-global nothing here sets and any other library may change. Worse,
+    the multiplication rounded before the ceiling was applied, so the ceiling had
+    nothing left to round up and the seller could under-receive. `Fraction(Decimal)`
+    is exact and context-free, and the ceiling is taken on integers.
     """
     if price_usd <= 0:
         raise ValueError("price_usd must be positive")
     if rate_xno_usd <= 0:
         raise ValueError("rate_xno_usd must be positive")
-    xno = price_usd / rate_xno_usd
-    raw_dec = (xno * RAW_PER_NANO).to_integral_value(rounding=ROUND_CEILING)
-    return int(raw_dec)
+    exact = Fraction(Decimal(price_usd)) * int(RAW_PER_NANO) / Fraction(Decimal(rate_xno_usd))
+    return -((-exact.numerator) // exact.denominator)
 
 
 def exact_xno_amount(
