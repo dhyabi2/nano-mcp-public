@@ -67,13 +67,24 @@ def test_fetch_median_requires_two_healthy():
 
 def test_usd_to_xno_raw_rounds_up_never_underpays():
     # $1.00 at $0.34/XNO -> 2.941176... XNO -> ceil to a whole raw.
+    #
+    # `expect` is derived with exact integer arithmetic, NOT from the same
+    # Decimal expression the implementation uses. It used to be
+    #
+    #     int((Decimal("1.00") / Decimal("0.34") * RAW_PER_NANO)
+    #         .to_integral_value(rounding="ROUND_CEILING"))
+    #
+    # which rounds to the active context precision exactly as the old
+    # implementation did, so this law restated the bug and passed beside it.
+    from fractions import Fraction
+
     raw = usd_to_xno_raw(Decimal("1.00"), Decimal("0.34"))
-    expect = int((Decimal("1.00") / Decimal("0.34") * RAW_PER_NANO).to_integral_value(
-        rounding="ROUND_CEILING"
-    ))
+    q = Fraction(Decimal("1.00")) * int(RAW_PER_NANO) / Fraction(Decimal("0.34"))
+    expect = -((-q.numerator) // q.denominator)
     assert raw == expect
-    # the seller receives at least the quoted USD value at that rate
-    assert raw * Decimal("0.34") >= Decimal("1.00") * RAW_PER_NANO
+    # the seller receives at least the quoted USD value at that rate -- checked in
+    # exact arithmetic, since a rounded Decimal product can satisfy it either way
+    assert Fraction(raw) * Fraction(Decimal("0.34")) >= Fraction(Decimal("1.00")) * int(RAW_PER_NANO)
 
 
 def test_usd_to_xno_raw_rejects_non_positive():
@@ -90,8 +101,15 @@ def test_exact_xno_amount_uses_fixed_rate_offline():
     assert rate == Decimal("0.34")
     expect = usd_to_xno_raw(Decimal("1.00"), Decimal("0.34"))
     assert raw == expect
-    # exact: amount == price / median rate, rounded up at raw scale
-    assert raw >= int(Decimal("1.00") / Decimal("0.34") * RAW_PER_NANO)
+    # exact: amount == price / median rate, rounded up at raw scale.
+    # The lower bound is taken in exact arithmetic: written as
+    # int(Decimal("1.00") / Decimal("0.34") * RAW_PER_NANO) it is itself rounded
+    # to the context precision and can land ABOVE the true amount, which is how
+    # it went red against a quote that is now exactly right.
+    from fractions import Fraction
+
+    bound = Fraction(Decimal("1.00")) * int(RAW_PER_NANO) / Fraction(Decimal("0.34"))
+    assert raw >= bound
 
 
 def test_quote_usd_returns_exact_median_amount_and_no_money_moves(tmp_path):
@@ -224,3 +242,63 @@ def test_live_median_of_three_sources_returns_numeric():
     assert min(rates) <= m <= max(rates)
     # sanity: a sane XNO price in USD
     assert Decimal("0.005") < m < Decimal("100")
+
+def test_the_quoted_amount_does_not_depend_on_the_process_decimal_precision():
+    """`usd_to_xno_raw` divided and multiplied in Decimal, and both round to
+    `decimal.getcontext().prec` -- a process-global nothing in this codebase
+    sets, which any other library in the same process may change. A raw XNO
+    amount carries 31 significant digits; the default context keeps 28.
+
+    So the same price at the same rate produced different amounts:
+
+        $1.00 at 0.34 USD/XNO, prec=28 -> 2941176470588235294117647059000
+        $1.00 at 0.34 USD/XNO, prec=50 -> 2941176470588235294117647058824
+
+    For an `exact`-scheme payment the amount IS the contract: a buyer and a
+    seller who agree on the price and the rate can still disagree on what must
+    be paid, and the facilitator refuses the difference. This is the same fault
+    nano_sdk/units.py documents having fixed for balances, one module over.
+    """
+    from decimal import localcontext
+
+    cases = [("1.00", "0.34"), ("0.01", "0.7331"), ("1", "3"), ("0.25", "1.07")]
+    for price, rate in cases:
+        answers = set()
+        for prec in (20, 28, 34, 50, 80):
+            with localcontext() as ctx:
+                ctx.prec = prec
+                answers.add(usd_to_xno_raw(Decimal(price), Decimal(rate)))
+        assert len(answers) == 1, (
+            f"${price} at {rate} USD/XNO quotes {sorted(answers)} depending on "
+            f"decimal.getcontext().prec"
+        )
+
+
+def test_the_quoted_amount_is_the_exact_ceiling_so_the_seller_never_under_receives():
+    """The docstring promises "no precision is ever lost" and "rounded UP
+    (ceiling) ... so the seller never under-receives". At the default precision
+    the multiplication rounded to 28 significant digits BEFORE the ceiling was
+    applied, so the ceiling had nothing left to round up and the result came out
+    below the true one:
+
+        $1 at 3 USD/XNO   exact 333333333333333333333333333334
+                          got   333333333333333333333333333300   (34 raw short)
+
+    The expected value here is derived with exact integer arithmetic through
+    Fraction, never from the implementation's own expression -- which is why
+    `test_usd_to_xno_raw_rounds_up_never_underpays` passed while the fault was
+    live: it built its `expect` from the same rounded formula.
+    """
+    from fractions import Fraction
+
+    def exact_ceiling(price: str, rate: str) -> int:
+        q = Fraction(Decimal(price)) * 10**30 / Fraction(Decimal(rate))
+        return -((-q.numerator) // q.denominator)
+
+    for price, rate in [("1", "3"), ("1", "7"), ("1.00", "0.34"), ("0.01", "0.7331"),
+                        ("0.25", "1.07"), ("2.50", "0.9999"), ("0.000001", "1.23456789")]:
+        want = exact_ceiling(price, rate)
+        got = usd_to_xno_raw(Decimal(price), Decimal(rate))
+        assert got == want, f"${price} at {rate}: quoted {got}, exact ceiling {want}"
+        # and the promise itself, checked in exact arithmetic rather than Decimal
+        assert Fraction(got) * Fraction(Decimal(rate)) >= Fraction(Decimal(price)) * 10**30
