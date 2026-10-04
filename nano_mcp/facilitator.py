@@ -100,6 +100,26 @@ class NormalizedBlock:
         return self.subtype in ("send", "state", "")
 
 
+def _contents_of(raw: dict) -> dict:
+    """The block's contents as a mapping, however the node chose to send them.
+
+    A node that honours `json_block: "true"` sends an object. A node that
+    ignores it sends the same thing as an opaque JSON string - and the payee of
+    a state block lives only in there, so reading the string is the difference
+    between checking who was paid and not being able to.
+    """
+    contents = raw.get("contents")
+    if isinstance(contents, dict):
+        return contents
+    if isinstance(contents, str) and contents.strip():
+        try:
+            parsed = json.loads(contents)
+        except ValueError:
+            return {}
+        return parsed if isinstance(parsed, dict) else {}
+    return {}
+
+
 def normalize_block_info(raw: dict) -> NormalizedBlock:
     """Map a node's `block_info` response into the canonical form.
 
@@ -123,7 +143,7 @@ def normalize_block_info(raw: dict) -> NormalizedBlock:
     account = str(raw.get("block_account") or raw.get("account") or "")
 
     # Subtype: contents.type (real send blocks) or subtype/type top-level.
-    contents = raw.get("contents") or {}
+    contents = _contents_of(raw)
     subtype = str(
         raw.get("subtype")
         or raw.get("type")
@@ -246,7 +266,14 @@ def verify_block_on_independent_endpoints(
 
     for ep in endpoints:
         try:
-            info = ep.invoke("block_info", hash=block_hash)
+            # `json_block: "true"` is REQUIRED, not optional: without it a node
+            # returns `contents` as an opaque JSON STRING, and the payee - which
+            # on a state block lives only in `contents.link_as_account` - cannot
+            # be read at all. rpc.nano.to is a wrapper that normalises contents
+            # to an object either way, which is why omitting this looked
+            # harmless; rainstorm.city/api is a plainer proxy and does not, so
+            # the live two-endpoint test refused there.
+            info = ep.invoke("block_info", json_block="true", hash=block_hash)
             nb = normalize_block_info(info)
             if not nb.confirmed:
                 raise RpcError(f"block not confirmed on {ep.url}")

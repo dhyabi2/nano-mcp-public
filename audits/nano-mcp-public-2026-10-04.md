@@ -83,3 +83,48 @@ merge in sequence.
   modules not in this release) were not run.
 - The rest of the tree was not re-audited this run; the 2026-10-03 audit covers it, and this run
   was spent on the defect the twin's audit surfaced.
+
+---
+
+## Follow-up the same day: the payee fix was incomplete here too
+
+CI on the private twin caught what this repository has **no CI to catch**: after the payee
+refusal landed, the live two-endpoint test refused a real payment on
+`https://rainstorm.city/api` with *"carries no payee account"*, while `rpc.nano.to` verified the
+same block fine.
+
+**Root cause: the `block_info` call omitted `json_block: "true"`.** Without it a node returns
+`contents` as an opaque JSON **string**, and a state block's payee lives only in
+`contents.link_as_account` — so there is nothing to read. `rpc.nano.to` is a wrapper that
+normalises `contents` to an object either way, which is why omitting the parameter looked
+harmless and why the original defect survived a test named for the real node shape.
+`rainstorm.city/api` is a plainer proxy and does not normalise. It also explains why only the
+payee broke and not the amount or the confirmation: those are **top-level** fields, unaffected
+by how `contents` is encoded.
+
+This repository carries the same `tests/test_facilitator_live.py` and the same omitted
+parameter, so it had the same latent fault: against a non-normalising endpoint, the new refusal
+would have refused a real payment.
+
+**The twin's patch applied unchanged** (the files were still identical): the call now passes
+`json_block="true"`, and `_contents_of()` parses a string-encoded `contents` anyway for a node
+that ignores the parameter. Unparseable contents read as absent and the payee refusal still
+fires. Nothing is widened.
+
+Five more tests, carried over with it. `README.md:31` moves **156 → 161** for the
+`test_readme.py` count law. **160 passed (155 before).**
+
+## Needs the owner — this repository has no test workflow
+
+`.github/` holds only `publish.yml`. **No workflow runs the suite**, so `main` here carries zero
+checks and nothing would have reported either half of this defect; the private twin's CI is what
+surfaced it. `git actions` lists 0 workflow runs on `main`, ever. For the *public* half of the
+pair — the one an outside agent installs — that is the gap worth closing, and adding CI is
+infrastructure rather than an XNO-path fix, so it is reported here rather than done.
+
+## Could not verify (follow-up)
+
+- **`rainstorm.city/api` is unreachable from this environment** (egress policy denies the CONNECT
+  with 403), so the live test skips here and it is not confirmed first-hand that the endpoint now
+  yields a payee. What is confirmed is the shape question. With no CI in this repository there is
+  also no second window onto it — the twin's CI is the only one.
