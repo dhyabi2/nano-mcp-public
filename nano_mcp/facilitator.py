@@ -91,7 +91,7 @@ class NormalizedBlock:
     account: str          # emitter (may be blank if node omits it; the payer is
                           # not required by the spec but a blank is surfaced)
     subtype: str          # 'send' / 'state' / ''
-    destination: str      # receiver (link_as_account / contents.destination)
+    destination: str      # payee: contents.link_as_account on a real state block
     amount_raw: int
     confirmed: bool
 
@@ -131,12 +131,35 @@ def normalize_block_info(raw: dict) -> NormalizedBlock:
         or ""
     )
 
-    # Receiver: contents.destination (real) or link_as_account / destination.
+    # Receiver. A real node's send block is a STATE block, and a state block
+    # names its payee in `contents.link_as_account`; it has no
+    # `contents.destination` at all - that field belongs to the pre-state send
+    # blocks nobody has been able to create since 2018. Reading only
+    # `contents.destination` (plus two fields that live inside `contents`, never
+    # at the top level) left `destination` EMPTY for every block a real node
+    # ever returned, and the caller below then skipped the payee check
+    # entirely - so any confirmed send of the right amount verified, whoever it
+    # had actually paid.
+    #
+    # Captured from rpc.nano.to, block 64AD5A5C...FEDF, which is the shape that
+    # matters: top-level `subtype: "send"`, `contents.type: "state"`,
+    # `contents.link_as_account: nano_1natrium...`, and no `destination`
+    # anywhere. `tests/test_facilitator_real_node_shape.py` pins it verbatim.
+    #
+    # `link` is deliberately NOT a fallback: it is the payee as 64 hex
+    # characters, not as an account, so comparing it to a `nano_` payTo can only
+    # ever refuse a payment that was in fact made.
     destination = str(
-        (contents.get("destination") if isinstance(contents, dict) else None)
+        (
+            (
+                contents.get("link_as_account")
+                or contents.get("destination")
+            )
+            if isinstance(contents, dict)
+            else None
+        )
         or raw.get("link_as_account")
         or raw.get("destination")
-        or raw.get("link")
         or ""
     )
 
@@ -231,16 +254,30 @@ def verify_block_on_independent_endpoints(
                 raise RpcError(f"block subtype {nb.subtype!r} not a send on {ep.url}")
             if nb.amount_raw != expected:
                 raise RpcError(f"amount {nb.amount_raw} != required {expected} on {ep.url}")
-            receiver = nb.destination if nb.subtype == "send" and nb.destination else pay_to
-            if receiver != pay_to:
-                raise RpcError(f"block pays {receiver}, not payTo={pay_to} on {ep.url}")
+            # A payee this code could not read is a payee it cannot vouch for, so
+            # it refuses. This used to default `receiver` to `pay_to` and then
+            # compare the two, which is vacuously true - the check that proves
+            # the money arrived at the seller was skipped in exactly the case
+            # where it could not be made.
+            if not nb.destination:
+                raise RpcError(
+                    f"block_info on {ep.url} carries no payee account, so it cannot "
+                    f"prove who was paid; refusing rather than assuming payTo={pay_to}"
+                )
+            if nb.destination != pay_to:
+                raise RpcError(
+                    f"block pays {nb.destination}, not payTo={pay_to} on {ep.url}"
+                )
 
             confirmed_sends.append(
                 {
                     "block_hash": block_hash,
                     "payer": nb.account,
                     "amount": str(nb.amount_raw),
-                    "receiver": pay_to,
+                    # The payee the BLOCK names, now that it is checked to equal
+                    # pay_to. It used to be written as pay_to unconditionally,
+                    # so the receipt asserted a payee that had never been read.
+                    "receiver": nb.destination,
                     "confirmed": True,
                 }
             )
