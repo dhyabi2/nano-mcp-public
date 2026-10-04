@@ -16,6 +16,8 @@ any confirmed send of the right amount passed whoever it had paid.
 REAL_SEND below is captured from rpc.nano.to for block 64AD5A5C...FEDF, field for
 field, with only the signature truncated.
 """
+import json
+
 import pytest
 
 from nano_mcp.facilitator import (
@@ -180,3 +182,78 @@ def test_an_unconfirmed_real_block_is_refused(confirmed):
         endpoints(real_send(confirmed=confirmed)), BLOCK, PAYEE, AMOUNT
     )
     assert res.ok is False
+
+
+# --- the shape a node that does NOT normalise `contents` returns ------------
+#
+# `json_block: "true"` asks for contents as an object. A node that ignores it -
+# and rainstorm.city/api is one - returns the identical block as an opaque JSON
+# STRING. The payee of a state block lives only inside it, so a reader that
+# does not parse the string cannot see who was paid: the live two-endpoint test
+# in tests/test_facilitator_live.py refused on exactly this.
+
+
+def real_send_string_contents(**over):
+    block = real_send(**over)
+    block["contents"] = json.dumps(block["contents"])
+    return block
+
+
+def test_contents_sent_as_a_json_string_still_yields_the_payee():
+    raw = real_send_string_contents()
+    assert isinstance(raw["contents"], str)
+
+    nb = normalize_block_info(raw)
+
+    assert nb.destination == PAYEE, (
+        "a node that ignores json_block sends contents as a string; the payee "
+        "is in there and must still be read, or the payee check cannot run"
+    )
+    assert nb.subtype == "send"
+
+
+def test_a_string_contents_send_to_a_stranger_is_refused():
+    res = verify_block_on_independent_endpoints(
+        endpoints(real_send_string_contents()), BLOCK, STRANGER, AMOUNT
+    )
+    assert res.ok is False
+    assert PAYEE in (res.reason or ""), res.reason
+
+
+def test_a_string_contents_send_to_the_right_payee_verifies():
+    """What the live test needs: this endpoint shape must not be refused."""
+    res = verify_block_on_independent_endpoints(
+        endpoints(real_send_string_contents()), BLOCK, PAYEE, AMOUNT
+    )
+    assert res.ok is True, res.reason
+    assert res.confirmed_sends[0]["receiver"] == PAYEE
+
+
+def test_contents_that_is_not_json_reads_as_absent_and_refuses():
+    """Unparseable contents must not raise out of the verifier."""
+    raw = real_send(contents="<html>maintenance</html>")
+
+    assert normalize_block_info(raw).destination == ""
+
+    res = verify_block_on_independent_endpoints(
+        endpoints(raw), BLOCK, PAYEE, AMOUNT
+    )
+    assert res.ok is False
+    assert "no payee account" in (res.reason or ""), res.reason
+
+
+def test_the_block_info_call_asks_for_json_block():
+    """The request itself, since omitting it is what caused the live refusal."""
+    seen = []
+
+    def record(action, params):
+        seen.append((action, dict(params)))
+        return real_send()
+
+    eps = [RpcEndpoint(url=f"https://n{i}.example", call=record) for i in range(2)]
+    verify_block_on_independent_endpoints(eps, BLOCK, PAYEE, AMOUNT)
+
+    assert seen, "no call was made"
+    for action, params in seen:
+        assert action == "block_info"
+        assert params.get("json_block") == "true", params
