@@ -14,7 +14,11 @@ DEFAULT_RPC_URL = "https://rpc.nano.to"
 
 
 class RpcError(RuntimeError):
-    """Raised when the node returns an error payload or a non-2xx response."""
+    """Raised for every answer that is not a usable node reply.
+
+    That is: a non-2xx response, a body that is not JSON, a body that is not a JSON object, and
+    a JSON object carrying an `error` key. A caller handling RpcError has handled all of them.
+    """
 
 
 class RpcClient:
@@ -30,8 +34,21 @@ class RpcClient:
         resp = httpx.post(self.url, json=payload, headers=headers, timeout=self.timeout)
         if resp.status_code != 200:
             raise RpcError(f"rpc.nano.to HTTP {resp.status_code}: {resp.text[:300]}")
-        data = resp.json()
-        if isinstance(data, dict) and ("error" in data):
+        try:
+            data = resp.json()
+        except ValueError as ex:
+            # A 200 carrying something that is not JSON is not a node answer: it is whatever sat
+            # between us and the node - a proxy error page, a captive portal, a CDN interstitial.
+            # json.JSONDecodeError is a ValueError, so it escaped `except RpcError` entirely.
+            raise RpcError(f"rpc.nano.to returned a {resp.status_code} that is not JSON: "
+                           f"{resp.text[:300]!r}") from ex
+        if not isinstance(data, dict):
+            # Every documented action answers with a JSON object, and `call` is annotated `-> dict`.
+            # Returning a list or a bare scalar pushed the failure into the caller, which then did
+            # data["balance"] on it and raised TypeError far from the cause.
+            raise RpcError(f"rpc.nano.to returned {type(data).__name__}, not a JSON object: "
+                           f"{str(data)[:300]}")
+        if "error" in data:
             raise RpcError(f"rpc error: {data['error']}")
         return data
 
