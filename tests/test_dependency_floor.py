@@ -33,6 +33,20 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 # restatement of pyproject.toml - the right-hand side is the observation.
 MCP_SUBMODULE_INTRODUCED_IN = {
     "mcp.server.mcpserver": (2, 0),
+    # Added with the ToolError translation in `server.py`. Measured the way this
+    # law demands, in clean virtualenvs:
+    #
+    #     mcp==2.0.0  from mcp.server.mcpserver.exceptions import ToolError -> OK
+    #     mcp==2.1.0  OK
+    #
+    # So it is present at the floor already declared, and the floor does not move.
+    # mcp==1.9.0 could NOT be re-measured here, and that is recorded rather than
+    # inferred: that release no longer imports at all against a current pydantic
+    # (`ImportError: cannot import name 'eval_type_backport'`), which is a fact
+    # about the sandbox and not about the submodule. It does not affect the
+    # answer - the parent module above is already 2.0, so no 1.x release can
+    # carry a submodule of it.
+    "mcp.server.mcpserver.exceptions": (2, 0),
 }
 
 

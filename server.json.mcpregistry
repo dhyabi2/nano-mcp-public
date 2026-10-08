@@ -1,11 +1,11 @@
 {
   "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
-  "name": "io.github.PANDeveloper001/nano-mcp",
+  "name": "io.github.dhyabi2/nano-mcp",
   "title": "Nano (XNO) pay-per-call for AI agents",
   "description": "Pay-per-call in Nano (XNO): one-time address per request, feeless, self-custodied. MCP server + SDK.",
   "version": "0.1.0",
   "repository": {
-    "url": "https://github.com/PANDeveloper001/nano-mcp-public",
+    "url": "https://github.com/dhyabi2/nano-mcp-public",
     "source": "github"
   },
   "packages": [

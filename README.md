@@ -3,7 +3,7 @@
 <!-- MCP Registry ownership proof: the official registry verifies a PyPI package by
      finding this exact string in the package README (which becomes the PyPI
      description). Keep it identical to the server name in server.json.mcpregistry. -->
-<!-- mcp-name: io.github.PANDeveloper001/nano-mcp -->
+<!-- mcp-name: io.github.dhyabi2/nano-mcp -->
 
 An **MCP server + SDK** so any AI agent can hold XNO (Nano) and pay per API call, transacting
 through the public node **rpc.nano.to** (no local node, no issuer, no bridge).
@@ -28,7 +28,23 @@ NANO_PAYMENT_MASTER_SECRET=$(python3 -c "import os;print(os.urandom(32).hex())")
 # 2. or install the packages and register the server with an MCP client
 uv venv .venv && source .venv/bin/activate
 uv pip install -e ".[dev]"
-python -m pytest -m "not network"        # 184 offline tests collected, all pass; 3 journal-plugin modules skip (not in this release)
+python -m pytest -m "not network"        # 201 offline tests collected; 3 journal-plugin modules skip (not in this release)
+
+# 3. installing the package puts the server on PATH as `nano-mcp` -- this is the
+#    command an MCP client config starts, and the one the registry entry means
+#    by its `stdio` transport
+NANO_PAYMENT_MASTER_SECRET=$(python3 -c "import os;print(os.urandom(32).hex())") nano-mcp
+```
+
+`nano-mcp` starts and lists its tools with **no configuration at all**, which is what an MCP
+directory asks of it; the tools that must derive a payment address refuse until
+`NANO_PAYMENT_MASTER_SECRET` is set, naming the variable. To see that exchange yourself, exactly
+as a directory performs it:
+
+```bash
+python tools/directory_handshake.py -- nano-mcp
+# 7 tools: get_address, get_balance, get_history, pay_and_call, quote, quote_usd, verify_payment
+# the handshake completed: a directory can start this server and list its tools
 ```
 
 Verified public install (pinned to the `v0.1.0` tag):

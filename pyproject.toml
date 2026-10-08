@@ -13,6 +13,13 @@ dependencies = [
     "mcp>=2.0",
 ]
 
+# The command an MCP host or directory starts. Without it the only way in was
+# `python -m nano_mcp.server`, which no registry entry can be expected to guess --
+# and server.json.mcpregistry declares a `stdio` transport, which is a promise that
+# such a command exists.
+[project.scripts]
+nano-mcp = "nano_mcp.server:main"
+
 [project.optional-dependencies]
 dev = ["pytest>=7"]
 
