@@ -1,0 +1,143 @@
+name: test
+
+# This repository is the one people `pip install`, and its 180 tests had never
+# once run on a runner: `publish.yml` was the only workflow, so the sole check
+# any commit here ever got was that `uv build` produced a file.
+#
+# What that hid is the reason this file exists rather than a tidying-up. On
+# 2026-10-03 the published twin encoded an address no private key can sign for
+# and rounded a seller's amount short; on 2026-10-08 `repr(Wallet)` printed the
+# seed in full and `send(dest, True)` signed and broadcast a real send of 1 raw.
+# Both times the suite in this tree was GREEN - a missing refusal has no failing
+# test - so CI would not have caught either one. That is honest and it is not an
+# argument against running the suite: it is why the suite running is the floor
+# and not the ceiling. What CI does catch is the other class, the one that broke
+# the sibling repository for the whole life of a wrong dependency declaration:
+# an install that cannot import the package it just installed.
+#
+# So the install step is deliberately `pip install -e ".[dev]"` - the declared
+# dependencies, resolved from scratch, the same command the README gives - and
+# not a pinned list. Pinning the runner's versions would make this workflow
+# green on exactly the commit whose declaration a stranger cannot install.
+#
+# The `floor` job exists for the other direction: the matrix resolves to the
+# newest `mcp`, which says nothing about the lowest version this package claims
+# to accept. It reads the floor out of pyproject.toml rather than repeating it,
+# so the declaration and the thing being tested cannot drift apart.
+#
+# Network is deselected by the repository's own `network` marker, so nothing
+# here touches rpc.nano.to.
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # The whole range `requires-python = ">=3.10"` admits. 3.11, 3.12 and
+        # 3.13 were each measured green before this file was written; 3.10 is
+        # the declared floor and every dependency accepts it and ships a cp310
+        # wheel, but no 3.10 interpreter was available where it was written, so
+        # this job is the first measurement of it. A red 3.10 leg is a finding
+        # about `requires-python`, not a flake.
+        python-version: ["3.10", "3.11", "3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install from the declared dependencies
+        run: pip install -e ".[dev]"
+
+      - name: Offline suite
+        run: python -m pytest -q -m "not network"
+
+      # What a stranger does on first contact: install from a clean clone and
+      # start the server the way the README's second quickstart says to. Unlike
+      # its sibling, THIS server refuses to start without a master secret, which
+      # is the stricter and better contract - so both halves are pinned here:
+      # the refusal, and that a configured server really does list its tools.
+      # The throwaway secret is generated inside Python and never crosses a
+      # shell boundary, so nothing a runner logs can carry it.
+      - name: Unconfigured, the server refuses; configured, it lists its tools
+        run: |
+          python - <<'PY'
+          import asyncio, os
+
+          os.environ.pop("NANO_PAYMENT_MASTER_SECRET", None)
+          from nano_mcp.server import server_from_env
+
+          try:
+              server_from_env()
+          except RuntimeError as ex:
+              print(f"unconfigured -> refused: {ex}")
+          else:
+              raise AssertionError(
+                  "server_from_env() started with no master secret - it must refuse, "
+                  "because a generated-on-the-fly secret would mint addresses whose "
+                  "keys die with the process and any payment to one is unrecoverable"
+              )
+
+          os.environ["NANO_PAYMENT_MASTER_SECRET"] = os.urandom(32).hex()
+          server = server_from_env()
+          names = sorted(tool.name for tool in asyncio.run(server.list_tools()))
+          print(f"{server.name} exposes {len(names)}: {names}")
+          assert names, "the server started but exposes no tools"
+          PY
+
+  floor:
+    name: the declared mcp floor
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          # The lowest interpreter requires-python admits, paired with the
+          # lowest mcp the dependency admits: the oldest install this package
+          # claims to support.
+          python-version: "3.10"
+
+      - name: Install from the declared dependencies
+        run: pip install -e ".[dev]"
+
+      - name: Pin mcp down to the declared floor
+        run: |
+          floor=$(python - <<'PY'
+          from packaging.requirements import Requirement
+          from setuptools.config.pyprojecttoml import apply_configuration
+          from setuptools.dist import Distribution
+
+          dist = apply_configuration(Distribution(), "pyproject.toml")
+          mcp = next(r for r in map(Requirement, dist.install_requires) if r.name == "mcp")
+          lowest = sorted(s.version for s in mcp.specifier if s.operator in (">=", "==", "~="))
+          assert lowest, f"mcp{mcp.specifier} states no lower bound to test"
+          print(lowest[0])
+          PY
+          )
+          echo "declared floor: mcp==$floor"
+          pip install "mcp==$floor"
+
+      - name: Offline suite at the floor
+        run: python -m pytest -q -m "not network"
+
+      - name: The declared floor starts a configured server
+        run: |
+          python - <<'PY'
+          import asyncio, os
+
+          os.environ["NANO_PAYMENT_MASTER_SECRET"] = os.urandom(32).hex()
+          from nano_mcp.server import server_from_env
+
+          tools = asyncio.run(server_from_env().list_tools())
+          assert tools, "the server started but exposes no tools"
+          print(f"the declared floor starts and exposes {len(tools)} tools")
+          PY
