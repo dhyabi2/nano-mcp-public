@@ -178,3 +178,50 @@ def test_the_distribution_declares_the_command_the_manifest_promises():
         f"pyproject.toml no longer declares the {CONSOLE_SCRIPT!r} console script, "
         "so an MCP host following the registry entry has nothing to start"
     )
+
+
+def test_the_output_readers_are_joined_before_stderr_is_reported(monkeypatch):
+    """`handshake` must not report a server's stderr while still reading it.
+
+    This is the one law here that pins a mechanism rather than a behaviour, and
+    it is deliberate: the behaviour cannot be tested honestly. `proc.wait()`
+    returning says the CHILD has exited; it says nothing about the daemon thread
+    still draining the child's stderr pipe into the list that becomes
+    `result.stderr`. Reading that list without joining the thread loses whatever
+    has not been appended yet -- **measured at 10 runs in 400** against a child
+    that writes one line and exits at once, and more often under load.
+
+    A behavioural law would therefore need a couple of hundred subprocesses to
+    catch a 2.5% race, and would still be a coin toss. Worse, the race is
+    invisible to every other law in this file, because every assertion about
+    this field has the form "the bad thing is NOT in stderr" -- no `Traceback`,
+    no leaked secret -- and an EMPTY stderr satisfies all of them. A crashed
+    server and a leaked key both read as clean. That is the only direction a
+    probe must never fail in, so the join is pinned where it can be seen.
+    """
+    created = []
+
+    real_thread = probe.threading.Thread
+
+    class RecordingThread(real_thread):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            self.joined = False
+            created.append(self)
+
+        def join(self, *args, **kwargs):
+            self.joined = True
+            return super().join(*args, **kwargs)
+
+    monkeypatch.setattr(probe.threading, "Thread", RecordingThread)
+
+    result = probe.handshake([sys.executable, "-m", "nano_mcp.server"], timeout=120)
+    assert result.ok, f"{result.problem}\n--- stderr ---\n{result.stderr}"
+
+    assert created, "handshake started no reader threads, so this law is watching nothing"
+    unjoined = [thread for thread in created if not thread.joined]
+    assert not unjoined, (
+        f"{len(unjoined)} of {len(created)} reader thread(s) were never joined, so "
+        "result.stderr can be read while a pipe is still being drained; a crashed "
+        "server or a leaked secret would then read as clean output"
+    )

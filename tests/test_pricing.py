@@ -302,3 +302,54 @@ def test_the_quoted_amount_is_the_exact_ceiling_so_the_seller_never_under_receiv
         assert got == want, f"${price} at {rate}: quoted {got}, exact ceiling {want}"
         # and the promise itself, checked in exact arithmetic rather than Decimal
         assert Fraction(got) * Fraction(Decimal(rate)) >= Fraction(Decimal(price)) * 10**30
+
+
+def test_a_non_finite_price_or_rate_is_refused_by_name():
+    """A rate source that answers NaN must be told apart from a bug here.
+
+    Before the guard, NaN reached `<= 0` and raised `decimal.InvalidOperation`
+    with an EMPTY message, and an infinity reached `Fraction()` and raised
+    `OverflowError: cannot convert Infinity to integer ratio`. Neither produced a
+    wrong amount - this function has always failed closed - but a caller reading
+    either one cannot tell which input was at fault, or whether the fault is in
+    the price, the rate, or the conversion itself.
+    """
+    for price, rate in (
+        (Decimal("1.00"), Decimal("NaN")),
+        (Decimal("NaN"), Decimal("0.33")),
+        (Decimal("1.00"), Decimal("Infinity")),
+        (Decimal("Infinity"), Decimal("0.33")),
+        (Decimal("1.00"), Decimal("-Infinity")),
+    ):
+        with pytest.raises(ValueError, match="finite"):
+            usd_to_xno_raw(price, rate)
+
+
+def test_the_positivity_refusals_still_hold_and_still_name_their_argument():
+    """The guard above must not have shadowed the two refusals after it."""
+    with pytest.raises(ValueError, match="price_usd must be positive"):
+        usd_to_xno_raw(Decimal("0"), Decimal("0.33"))
+    with pytest.raises(ValueError, match="price_usd must be positive"):
+        usd_to_xno_raw(Decimal("-1"), Decimal("0.33"))
+    with pytest.raises(ValueError, match="rate_xno_usd must be positive"):
+        usd_to_xno_raw(Decimal("1.00"), Decimal("0"))
+    with pytest.raises(ValueError, match="rate_xno_usd must be positive"):
+        usd_to_xno_raw(Decimal("1.00"), Decimal("-0.33"))
+
+
+def test_the_amount_is_unchanged_for_every_finite_input():
+    """The guard is refusal-only: no finite price or rate answers differently.
+
+    Checked against the exact rational ceiling rather than against the previous
+    implementation, so this is a statement about the number being right and not
+    merely about it being the same.
+    """
+    import math
+    import random
+    from fractions import Fraction as F
+
+    random.seed(11)
+    for _ in range(5000):
+        price = Decimal(str(random.randint(1, 10**6))).scaleb(-random.randint(0, 6))
+        rate = Decimal(str(random.randint(1, 10**9))).scaleb(-random.randint(0, 9))
+        assert usd_to_xno_raw(price, rate) == math.ceil(F(price) * 10**30 / F(rate))
