@@ -104,12 +104,25 @@ def usd_to_xno_raw(price_usd: Decimal, rate_xno_usd: Decimal) -> int:
     the multiplication rounded before the ceiling was applied, so the ceiling had
     nothing left to round up and the seller could under-receive. `Fraction(Decimal)`
     is exact and context-free, and the ceiling is taken on integers.
+
+    A non-finite input is refused by name before any arithmetic. Without that,
+    NaN reached `<= 0` and raised `decimal.InvalidOperation` carrying an EMPTY
+    message, and an infinity reached `Fraction()` and raised `OverflowError:
+    cannot convert Infinity to integer ratio`. Neither returned a wrong amount --
+    this function has always failed closed -- but neither named the input at
+    fault, and a rate source that answers `NaN` is a thing that happens.
     """
-    if price_usd <= 0:
+    price = Decimal(price_usd)
+    rate = Decimal(rate_xno_usd)
+    if not price.is_finite() or not rate.is_finite():
+        raise ValueError(
+            f"price and rate must be finite numbers: {price_usd!r}, {rate_xno_usd!r}"
+        )
+    if price <= 0:
         raise ValueError("price_usd must be positive")
-    if rate_xno_usd <= 0:
+    if rate <= 0:
         raise ValueError("rate_xno_usd must be positive")
-    exact = Fraction(Decimal(price_usd)) * int(RAW_PER_NANO) / Fraction(Decimal(rate_xno_usd))
+    exact = Fraction(price) * int(RAW_PER_NANO) / Fraction(rate)
     return -((-exact.numerator) // exact.denominator)
 
 
