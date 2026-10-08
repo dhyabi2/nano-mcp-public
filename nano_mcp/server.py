@@ -89,13 +89,20 @@ def build_server(pay: PaymentService, title: str = "nano-mcp pay-per-call") -> M
         return q.as_dict()
 
     @server.tool()
-    def verify_payment(request_id: str, amount_raw: str, require_onchain: bool = True) -> dict:
+    def verify_payment(request_id: str, amount_raw: str) -> dict:
         """Service side: approve the call for request_id once an on-chain send of at
         least amount_raw is confirmed to its one-time address. Approves exactly once;
-        a repeat returns status='spent'."""
-        return srv.verify_payment(
-            request_id, int(amount_raw), require_onchain=require_onchain
-        )
+        a repeat returns status='spent'.
+
+        `amount_raw` can only make the check STRICTER: the amount actually required
+        is the higher of it and what this server quoted for request_id.
+
+        There is deliberately no `require_onchain` argument here. The service
+        method takes one so in-process tests can run without a node, but over the
+        tool surface the caller is the payer, and a payer that can pass
+        require_onchain=false is approved with tx_hash "simulated" without any
+        payment at all."""
+        return srv.verify_payment(request_id, int(amount_raw), require_onchain=True)
 
     @server.tool()
     def pay_and_call(request_id: str, amount_raw: str, tool: str) -> dict:
