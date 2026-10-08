@@ -61,6 +61,18 @@ class Quote:
         return now > self.expires_at
 
 
+class MasterSecretNotConfigured(RuntimeError):
+    """Raised when a tool that must derive a payment address has no master secret.
+
+    Listing the server's tools needs no key, so the server starts without one (an
+    MCP directory boots it from a clean clone and asks for `tools/list`). Deriving
+    a one-time address does need one, and there is deliberately no fallback: a
+    generated-on-the-fly secret would mint addresses whose keys die with the
+    process, so a payment sent to one would be unrecoverable. Set
+    NANO_PAYMENT_MASTER_SECRET instead.
+    """
+
+
 class HistoryClient(Protocol):
     """Minimal RPC surface the payment service needs (enables stub clients)."""
 
@@ -70,7 +82,7 @@ class HistoryClient(Protocol):
 class PaymentService:
     def __init__(
         self,
-        master_secret: bytes,
+        master_secret: bytes | None = None,
         client: HistoryClient | None = None,
         store: ApprovalStore | None = None,
         rate_source: Callable[[], Decimal] | None = None,
@@ -85,6 +97,12 @@ class PaymentService:
         self.clock = clock if clock is not None else time.time
 
     def one_time_account(self, request_id: str):
+        if self.master_secret is None:
+            raise MasterSecretNotConfigured(
+                "NANO_PAYMENT_MASTER_SECRET is not set, so this server cannot derive "
+                "a payment address. Set it to 32+ bytes of hex and restart. "
+                "Tools that only read the chain (get_balance, get_history) work without it."
+            )
         return derive_one_time_account(self.master_secret, request_id)
 
     def quote(self, price_raw: int, request_id: str | None = None) -> Quote:

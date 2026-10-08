@@ -14,23 +14,56 @@ the NANO_PAYMENT_MASTER_SECRET env var (seeds/keys stay out of repos).
 """
 from __future__ import annotations
 
+import functools
 import os
 
 from mcp.server.mcpserver import MCPServer
+from mcp.server.mcpserver.exceptions import ToolError
 
 from nano_sdk.client import RpcClient
 from nano_sdk.units import nano_to_raw
 
-from .service import PaymentService
+from .service import MasterSecretNotConfigured, PaymentService
+
+
+def _configurable(fn):
+    """Let a missing-configuration message reach the caller.
+
+    MCPServer carries the text of a `ToolError` back to the agent and deliberately
+    withholds the text of anything else -- an uncaught error arrives as the bare
+    "Error executing tool quote", which tells an operator nothing about what to do.
+    "Set NANO_PAYMENT_MASTER_SECRET" is precisely the thing they need to read, so
+    the deriving tools translate it into the error the protocol shows.
+    """
+
+    @functools.wraps(fn)
+    def wrapper(*args, **kwargs):
+        try:
+            return fn(*args, **kwargs)
+        except MasterSecretNotConfigured as exc:
+            raise ToolError(str(exc)) from exc
+
+    return wrapper
 
 
 def server_from_env(
     master_secret: bytes | None = None,
     client: RpcClient | None = None,
 ) -> MCPServer:
+    """Build the stdio server from the environment.
+
+    The server starts whether or not NANO_PAYMENT_MASTER_SECRET is set, because
+    `tools/list` needs no key: an MCP directory (Glama, the official registry)
+    installs the package from a clean clone, starts it with no configuration and
+    asks for the tool list, and so does an agent host deciding whether to keep the
+    server. Refusing to start there made the server look broken to every directory.
+
+    Without the secret the read-only tools work and every address-deriving tool
+    raises `MasterSecretNotConfigured` naming the variable to set. Nothing is
+    generated as a stand-in: a throwaway secret would mint payment addresses whose
+    keys vanish with the process, and XNO sent to one of those is unrecoverable.
+    """
     secret = master_secret or os.environ.get("NANO_PAYMENT_MASTER_SECRET")
-    if secret is None:
-        raise RuntimeError("NANO_PAYMENT_MASTER_SECRET must be set (32+ bytes hex)")
     if isinstance(secret, str):
         secret = bytes.fromhex(secret)
     return build_server(PaymentService(master_secret=secret, client=client))
@@ -50,6 +83,7 @@ def build_server(pay: PaymentService, title: str = "nano-mcp pay-per-call") -> M
     srv = pay
 
     @server.tool()
+    @_configurable
     def get_address(request_id: str | None = None) -> str:
         """Return the one-time Nano payment address for request_id (or mint a fresh)."""
         if request_id:
@@ -69,6 +103,7 @@ def build_server(pay: PaymentService, title: str = "nano-mcp pay-per-call") -> M
         return list(srv.client.account_history(account, count=count).get("history", []))
 
     @server.tool()
+    @_configurable
     def quote(price_nano: str, request_id: str | None = None) -> dict:
         """Price a call in Nano. Returns {request_id, address, price_raw, price_nano}
         where `address` is the ONE-TIME payment address for this request. Send the
@@ -78,6 +113,7 @@ def build_server(pay: PaymentService, title: str = "nano-mcp pay-per-call") -> M
         return q.as_dict()
 
     @server.tool()
+    @_configurable
     def quote_usd(price_usd: str, request_id: str | None = None) -> dict:
         """Price a call in dollars. Converts the USD price to the exact XNO amount
         via the MEDIAN of three independent public price sources and returns
@@ -89,6 +125,7 @@ def build_server(pay: PaymentService, title: str = "nano-mcp pay-per-call") -> M
         return q.as_dict()
 
     @server.tool()
+    @_configurable
     def verify_payment(request_id: str, amount_raw: str) -> dict:
         """Service side: approve the call for request_id once an on-chain send of at
         least amount_raw is confirmed to its one-time address. Approves exactly once;
@@ -105,6 +142,7 @@ def build_server(pay: PaymentService, title: str = "nano-mcp pay-per-call") -> M
         return srv.verify_payment(request_id, int(amount_raw), require_onchain=True)
 
     @server.tool()
+    @_configurable
     def pay_and_call(request_id: str, amount_raw: str, tool: str) -> dict:
         """Agent side: given a quoted request_id, pay its one-time address and call
         `tool` after verify. NOTE: broadcast is not executed here in tests (no funded

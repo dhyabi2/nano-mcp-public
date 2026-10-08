@@ -9,10 +9,12 @@ at an account that answers 403:
 
 A reader has no way to tell that from a network problem or a mistake of their own.
 
-Scope: this law is about the *fetch* URLs only - what a reader clones or pip-installs. It
-deliberately says nothing about the MCP registry identity (`io.github.PANDeveloper001/nano-mcp` in
-the README marker and in server.json.mcpregistry), which is how the registry proves who owns the
-entry and is a publishing decision, not a broken link.
+Scope: this law is about the *fetch* URLs only - what a reader clones or pip-installs. It said
+nothing about the MCP registry identity in the README marker and in server.json.mcpregistry, on
+the grounds that choosing which of the owner's accounts publishes an entry is a publishing
+decision and not a broken link. That premise has since failed - the account it named is deleted,
+so there is no longer a decision to make - and the identity is now held by
+`tests/test_registry_identity.py`, whose docstring quotes this note and says why it changed.
 """
 import os
 import re

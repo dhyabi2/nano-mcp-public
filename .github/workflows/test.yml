@@ -62,37 +62,79 @@ jobs:
         run: python -m pytest -q -m "not network"
 
       # What a stranger does on first contact: install from a clean clone and
-      # start the server the way the README's second quickstart says to. Unlike
-      # its sibling, THIS server refuses to start without a master secret, which
-      # is the stricter and better contract - so both halves are pinned here:
-      # the refusal, and that a configured server really does list its tools.
-      # The throwaway secret is generated inside Python and never crosses a
+      # start the server with nothing configured.
+      #
+      # This step used to assert the OPPOSITE of what it asserts now, and the
+      # reversal is deliberate, so here is the premise that failed. It read
+      # "Unlike its sibling, THIS server refuses to start without a master
+      # secret, which is the stricter and better contract", and it failed the
+      # build if `server_from_env()` returned, "because a generated-on-the-fly
+      # secret would mint addresses whose keys die with the process and any
+      # payment to one is unrecoverable".
+      #
+      # That money reasoning is right and nothing here weakens it. But it was
+      # aimed at the wrong target: the alternative to refusing to START was never
+      # inventing a secret. The server now starts holding `None`, lists and
+      # describes every tool, serves the read-only ones, and refuses exactly the
+      # ones that must derive an address - naming the variable to set.
+      # `tests/test_server_unconfigured.py::test_no_stand_in_secret_is_invented`
+      # pins the absence of a fallback key, so the property this step was
+      # protecting is now under test directly rather than inferred from a failure
+      # to boot. Both halves are asserted below.
+      #
+      # What the old contract cost is the reason this repository exists. Every MCP
+      # directory discovers a server by installing it, starting it with an empty
+      # environment and sending `tools/list`. Refusing there is not strictness a
+      # directory can see; it reads as a dead server, so the published half of
+      # this project was undiscoverable by every host and registry it advertises
+      # itself to. A secret cannot be the price of being looked at.
+      #
+      # The throwaway secret below is generated inside Python and never crosses a
       # shell boundary, so nothing a runner logs can carry it.
-      - name: Unconfigured, the server refuses; configured, it lists its tools
+      - name: Unconfigured, the server starts and lists its tools, and mints no secret
         run: |
           python - <<'PY'
           import asyncio, os
 
           os.environ.pop("NANO_PAYMENT_MASTER_SECRET", None)
           from nano_mcp.server import server_from_env
+          from nano_mcp.service import MasterSecretNotConfigured, PaymentService
 
+          server = server_from_env()
+          names = sorted(tool.name for tool in asyncio.run(server.list_tools()))
+          assert names, "the server started but exposes no tools"
+          print(f"unconfigured -> {server.name} exposes {len(names)}: {names}")
+
+          # The money guarantee the old assertion was reaching for, stated
+          # directly: no key was invented, and the deriving path refuses.
+          unconfigured = PaymentService(master_secret=None)
+          assert unconfigured.master_secret is None, "a stand-in secret was invented"
           try:
-              server_from_env()
-          except RuntimeError as ex:
-              print(f"unconfigured -> refused: {ex}")
+              unconfigured.one_time_account("ci-probe")
+          except MasterSecretNotConfigured as ex:
+              assert "NANO_PAYMENT_MASTER_SECRET" in str(ex), ex
+              print(f"deriving an address -> refused: {ex}")
           else:
               raise AssertionError(
-                  "server_from_env() started with no master secret - it must refuse, "
-                  "because a generated-on-the-fly secret would mint addresses whose "
-                  "keys die with the process and any payment to one is unrecoverable"
+                  "an unconfigured service derived a payment address; its keys would "
+                  "die with the process and any XNO sent there is unrecoverable"
               )
 
           os.environ["NANO_PAYMENT_MASTER_SECRET"] = os.urandom(32).hex()
           server = server_from_env()
           names = sorted(tool.name for tool in asyncio.run(server.list_tools()))
-          print(f"{server.name} exposes {len(names)}: {names}")
-          assert names, "the server started but exposes no tools"
+          assert names, "the configured server exposes no tools"
+          print(f"configured -> {server.name} exposes {len(names)}: {names}")
           PY
+
+      # The in-process check above never runs the console script, `main()` or the
+      # stdio framing - the span that was broken here, because no console script
+      # was declared at all. The suite step covers it on every leg
+      # (`tests/test_directory_handshake.py`); this runs the same probe by hand
+      # against the installed command, so a reader of a red log sees the
+      # directory's own exchange rather than a pytest line.
+      - name: A directory's handshake, against the installed command
+        run: python tools/directory_handshake.py -- nano-mcp
 
   floor:
     name: the declared mcp floor
