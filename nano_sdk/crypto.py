@@ -94,6 +94,11 @@ def public_key_from_address(address: str) -> bytes:
 
     Raises ValueError if the address is malformed or the checksum is wrong.
     """
+    # A value that is not a string is malformed, not a different kind of failure.
+    # re.match() raises TypeError on None, bytes or an int, which escapes both the
+    # ValueError this function documents and validate_address()'s bool contract.
+    if not isinstance(address, str):
+        raise ValueError(f"address must be a string, got {type(address).__name__}")
     if not ADDRESS_RE.match(address):
         raise ValueError("malformed nano/xrb address")
     # Split on the separator, never on a fixed offset: the legacy prefix "xrb_"
