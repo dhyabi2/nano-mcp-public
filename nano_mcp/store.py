@@ -29,6 +29,14 @@ CREATE TABLE IF NOT EXISTS quote_expiry (
     request_id  TEXT PRIMARY KEY,
     expires_at  REAL NOT NULL
 );
+-- What THIS SERVER quoted for a request_id, so verify_payment does not have to
+-- believe the amount its caller names. price_raw is TEXT because a raw amount
+-- reaches 39 digits and SQLite's INTEGER is 64-bit, which overflows above
+-- ~1.8e19 raw -- less than 0.00002 XNO.
+CREATE TABLE IF NOT EXISTS quote_price (
+    request_id  TEXT PRIMARY KEY,
+    price_raw   TEXT NOT NULL
+);
 """
 
 
@@ -140,6 +148,36 @@ class ApprovalStore:
         )):
             ...
         self._conn.commit()
+
+    # ---- what the server quoted (the floor verify_payment holds to) ----
+    def record_quote_price(self, request_id: str, price_raw: int) -> None:
+        """Remember the amount this server quoted for `request_id`.
+
+        **Never lowers an existing record.** A request_id can be re-quoted -- and
+        `pay_and_call` re-quotes at an amount its own caller names -- so a plain
+        overwrite would let the payer quote itself down to 1 raw and then be
+        verified against that. The recorded floor only ever rises.
+        """
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT price_raw FROM quote_price WHERE request_id=?", (request_id,)
+            ).fetchone()
+            floor = max(int(row[0]) if row else 0, int(price_raw))
+            with closing(self._conn.execute(
+                "INSERT INTO quote_price (request_id, price_raw) VALUES (?,?) "
+                "ON CONFLICT(request_id) DO UPDATE SET price_raw=excluded.price_raw",
+                (request_id, str(floor)),
+            )):
+                ...
+            self._conn.commit()
+
+    def quote_price(self, request_id: str) -> int | None:
+        """The amount this server quoted for `request_id`, or None if it never did."""
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT price_raw FROM quote_price WHERE request_id=?", (request_id,)
+            ).fetchone()
+        return int(row[0]) if row else None
 
     def quote_expiry(self, request_id: str) -> float | None:
         with self._lock:

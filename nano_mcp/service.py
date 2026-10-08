@@ -90,6 +90,7 @@ class PaymentService:
     def quote(self, price_raw: int, request_id: str | None = None) -> Quote:
         rid = request_id or new_request_id()
         acct = self.one_time_account(rid)
+        self.store.record_quote_price(rid, int(price_raw))
         return Quote(request_id=rid, address=acct.address, price_raw=int(price_raw))
 
     def quote_usd(
@@ -110,6 +111,7 @@ class PaymentService:
         acct = self.one_time_account(rid)
         expires_at = self.clock() + QUOTE_TTL_SECONDS
         self.store.record_quote_expiry(rid, expires_at)
+        self.store.record_quote_price(rid, exact_raw)
         return Quote(
             request_id=rid,
             address=acct.address,
@@ -182,6 +184,19 @@ class PaymentService:
                 "request_id": request_id,
                 "address": acct.address,
             }
+
+        # The caller names `amount_raw`, and in the pay-per-call flow the caller IS
+        # the payer: the MCP tool docstrings tell a buyer to "pay the exact
+        # price_raw to `address` ... then call verify_payment(request_id,
+        # price_raw)". Believing that number let a payer quote 1 XNO, send 1 raw
+        # and ask to be verified against 1 raw. So the amount checked on-chain is
+        # the HIGHER of what the caller names and what this server actually
+        # quoted. It only ever rises: a caller asking for more than was quoted
+        # still gets the stricter check it asked for, and a request_id this
+        # server never quoted for is unchanged.
+        quoted = self.store.quote_price(request_id)
+        if quoted is not None and quoted > amount_raw:
+            amount_raw = quoted
 
         if require_onchain:
             tx_hash = self._onchain_paid(acct, amount_raw)
