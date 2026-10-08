@@ -161,3 +161,73 @@ def test_receive_open_account_uses_account_public_key_as_work_root():
     assert proc["block"]["previous"] == "0" * 64
     # open-block receive is still not an outgoing spend
     assert w._sent_today() == 0
+
+
+def test_wallet_repr_does_not_leak_the_seed():
+    """`repr(Wallet)` must never carry the seed.
+
+    `Account.__repr__` is deliberately overridden so a private key cannot reach a
+    log. `Wallet` holds the *seed*, from which every account's private key
+    derives, so it needs the same guard: a dataclass repr prints every field, and
+    anything that reprs locals (a traceback with locals, `pytest -l`,
+    `logging.exception`, a debugger, an agent's own run log) carried the seed with
+    it. This is the published package, so the leak shipped to whoever installed it.
+    """
+    seed = "9f" + "0e" * 31
+    w = Wallet(seed=seed, client=StubClient(balance_raw=1))
+    for rendered in (repr(w), str(w), f"{w}", "%r" % (w,)):
+        assert seed not in rendered
+        assert "seed" not in rendered
+    # bytes seeds must be hidden too, and not merely re-encoded
+    wb = Wallet(seed=bytes.fromhex(seed), client=StubClient(balance_raw=1))
+    assert seed not in repr(wb)
+    assert bytes.fromhex(seed).hex() not in repr(wb)
+    # the seed is still held and usable -- only its printing changed
+    assert w.seed == seed
+    assert w.account(0).address.startswith("nano_")
+
+
+def test_a_bool_amount_does_not_publish_a_send_of_one_raw():
+    """`True` is an `int` in Python and `True > 0`, so it passed every guard and
+    `raw_balance - True` signed and published a real send block of 1 raw."""
+    cap = int(nano_to_raw("0.01"))
+    client = StubClient(balance_raw=cap)
+    w = Wallet(seed=SEED, client=client)
+    with pytest.raises(ValueError):
+        w.send(DEST, True)
+    assert [c["action"] for c in client.calls] == [], (
+        "a bool amount reached work_generate/process"
+    )
+
+
+def test_check_send_rejects_an_amount_that_is_not_an_integer_count_of_raw():
+    """`check_send` is the guard that refuses *before* anything is signed or
+    published, so a non-integer amount has to be refused here, not later.
+
+    A float cannot hold a raw amount: at 10**30 raw to the XNO, binary floating
+    point has no exact representation (`int(1e26)` is 100000000000000004764729344,
+    4764729344 raw out). `block.py` catches it eventually, inside
+    `balance_raw.to_bytes(16, "big")`, but only as an `AttributeError` and only
+    after a `work_generate` round-trip has already been spent.
+    """
+    from decimal import Decimal
+
+    cap = int(nano_to_raw("0.01"))
+    for amount in (1e27, 0.001, Decimal(10 ** 27), "1000", b"1000", None, 1 + 0j):
+        client = StubClient(balance_raw=cap)
+        w = Wallet(seed=SEED, client=client)
+        with pytest.raises(ValueError):
+            w.check_send(amount, cap)
+
+
+def test_a_non_integer_amount_is_refused_before_work_or_process():
+    """The refusal must come before the node is touched at all, so no proof of
+    work is spent and no block is built for an amount that cannot be one."""
+    cap = int(nano_to_raw("0.01"))
+    client = StubClient(balance_raw=cap)
+    w = Wallet(seed=SEED, client=client)
+    with pytest.raises(ValueError):
+        w.send(DEST, 1e24)
+    assert [c["action"] for c in client.calls] == [], (
+        "a float amount reached work_generate/process"
+    )

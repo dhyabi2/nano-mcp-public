@@ -47,7 +47,11 @@ class DailyCapExceeded(RuntimeError):
 class Wallet:
     """A Nano wallet (seed + derived accounts) with send guards."""
 
-    seed: bytes | str
+    # repr=False: the seed derives every account's private key, so it must not
+    # reach a log. A dataclass repr prints every field, and anything that reprs
+    # locals (a traceback with locals, pytest -l, logging.exception, a debugger)
+    # would carry it. Account.__repr__ hides the private key for the same reason.
+    seed: bytes | str = field(repr=False)
     client: ClientLike = field(default_factory=RpcClient)
     daily_cap_raw: int = DEFAULT_DAILY_CAP_RAW
     representative: str = DEFAULT_REPRESENTATIVE
@@ -83,7 +87,22 @@ class Wallet:
 
     # -- guards -- (pure, unit-testable)
     def check_send(self, amount_raw: int, balance_raw: int) -> None:
-        """Raise if `amount_raw` overdraws `balance_raw` or the daily cap."""
+        """Raise if `amount_raw` is not raw, overdraws `balance_raw`, or the daily cap.
+
+        The type check comes first because this is the guard that runs before
+        anything is signed or published. Raw is an integer count (1 XNO = 10**30
+        raw) and nothing else will do: a float has no exact representation at that
+        scale, and `block.py` only noticed one inside
+        `balance_raw.to_bytes(16, "big")` -- an AttributeError, raised after a
+        `work_generate` round-trip had already been spent. `bool` is excluded
+        explicitly because it is a subclass of `int`: `True > 0` passed every guard
+        below and `balance - True` published a real send of 1 raw.
+        """
+        if isinstance(amount_raw, bool) or not isinstance(amount_raw, int):
+            raise ValueError(
+                "amount must be an integer count of raw (1 XNO = 10**30 raw), "
+                f"not {type(amount_raw).__name__}: {amount_raw!r}"
+            )
         if amount_raw <= 0:
             raise ValueError("amount must be > 0")
         if amount_raw > balance_raw:

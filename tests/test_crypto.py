@@ -302,3 +302,40 @@ def test_nano_to_raw_still_converts_every_accepted_amount_identically():
     from nano_sdk.units import nano_to_raw as to_raw
     for text, expected in ACCEPTED_AMOUNTS.items():
         assert to_raw(text) == expected, text
+
+
+def test_a_non_string_address_is_refused_not_a_crash():
+    """validate_address() is documented to return a bool and
+    public_key_from_address() to raise ValueError. Both used re.match() on their
+    argument first, which raises TypeError for None, bytes or an int -- so the
+    documented handler (`except ValueError`) did not catch a missing or
+    wrongly-typed address, and the validator crashed instead of answering False."""
+    addr = derive_account(DOCS_SEED, 0).address
+    for bad in (None, 123, addr.encode(), bytearray(addr.encode()), ["nano_x"], {}):
+        assert validate_address(bad) is False
+        with pytest.raises(ValueError):
+            public_key_from_address(bad)
+
+
+def test_the_wallet_guard_reports_a_non_string_destination_as_a_bad_address():
+    """Wallet.send validates its destination through validate_address, so the
+    crash surfaced there: a destination read as bytes, or absent from a config
+    and arriving as None, raised TypeError out of the guard instead of the
+    wallet's own ValueError, before any balance or cap was even considered."""
+    from nano_sdk import Wallet
+
+    class NeverCalled:
+        def account_info(self, account):  # pragma: no cover - must not be reached
+            raise AssertionError("the guard must refuse before any RPC")
+
+        def block_info(self, block_hash):  # pragma: no cover - must not be reached
+            raise AssertionError("the guard must refuse before any RPC")
+
+        def call(self, **payload):  # pragma: no cover - must not be reached
+            raise AssertionError("the guard must refuse before any RPC")
+
+    wallet = Wallet(seed=DOCS_SEED, client=NeverCalled())
+    good = derive_account(DOCS_SEED, 0).address
+    for bad in (None, good.encode()):
+        with pytest.raises(ValueError, match="destination is not a valid"):
+            wallet.send(bad, 1)
