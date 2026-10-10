@@ -516,7 +516,17 @@ class Facilitator:
         }
 
     def _check_requirements(self, requirements: dict, payload: dict) -> dict | None:
+        # Both halves have to be objects before anything is read off them. The
+        # HTTP surface passes whatever the body held: `{"requirements": []}`
+        # reached `requirements.get(...)` and raised AttributeError out of the
+        # handler, so the caller got a dropped connection instead of a verdict.
+        if not isinstance(requirements, dict) or not isinstance(payload, dict):
+            return self._invalid(
+                "bad-request", "requirements and payload must both be JSON objects"
+            )
         accepted = payload.get("accepted") or {}
+        if not isinstance(accepted, dict):
+            return self._invalid("bad-request", "payload.accepted must be a JSON object")
         if requirements.get("scheme") != self.scheme:
             return self._invalid("bad-scheme", "scheme must be exact")
         if (
@@ -533,6 +543,45 @@ class Facilitator:
             return self._invalid("bad-amount", "amount mismatch between requirements and accepted")
         if requirements.get("payTo") != accepted.get("payTo"):
             return self._invalid("bad-payto", "payTo mismatch between requirements and accepted")
+
+        # REQUIRED_SECTIONS was declared and never enforced, and the two checks
+        # above compare requirements to `accepted` rather than to anything: a
+        # field absent from BOTH is None == None and passed. `verify` and
+        # `settle` then indexed `requirements["payTo"]` / `["amount"]` directly
+        # and raised KeyError; a present-but-unparseable amount reached
+        # `parse_raw` outside any try and raised ValueError. Neither is caught
+        # anywhere above the HTTP handler, so a POST to /verify or /settle got
+        # no JSON answer at all - the connection was closed mid-request, which
+        # a paying agent cannot tell apart from the facilitator being down.
+        missing = [
+            name
+            for name in REQUIRED_SECTIONS
+            if not str(requirements.get(name) or "").strip()
+        ]
+        if missing:
+            return self._invalid(
+                "bad-requirements",
+                "requirements is missing or empty: " + ", ".join(missing),
+            )
+
+        # The amount is the only field that has to be arithmetic, and it is read
+        # once more in verify/settle. Refuse here what `parse_raw` cannot read,
+        # and refuse a non-positive amount: `""` parsed to 0 and `"-1"` to -1,
+        # both of which were carried all the way to the nodes as the amount to
+        # match. Decimal XNO strings ("0.000001") stay valid - parse_raw reads
+        # them - so nothing that was quotable before is refused now.
+        try:
+            amount_raw = parse_raw(requirements["amount"])
+        except (ValueError, TypeError):
+            return self._invalid(
+                "bad-amount",
+                f"amount is not a Nano amount: {requirements['amount']!r}",
+            )
+        if amount_raw <= 0:
+            return self._invalid(
+                "bad-amount",
+                f"amount must be a positive raw amount, got {requirements['amount']!r}",
+            )
         return None
 
     @staticmethod
