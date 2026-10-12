@@ -349,6 +349,154 @@ def test_a_fresh_store_is_unaffected(tmp_path):
     fac = _fac_on(path)
     assert _rows(path) == {}
     assert fac.settle(*_pair("aB" * 32, "Req_X"))["success"] is True
-    assert list(_rows(path)) == [f"nano:live {BLOCK.upper()} Req_X"]
+    expected = {f"nano:live {BLOCK.upper()} Req_X", f"nano:live {'aB' * 32} Req_X"}
+    assert set(_rows(path)) == expected
     ClaimStore(path=path)
-    assert list(_rows(path)) == [f"nano:live {BLOCK.upper()} Req_X"]
+    assert set(_rows(path)) == expected
+
+
+# ------------------------------------------- stores the migration cannot reach
+
+
+class DictStore:
+    """A custom claim store: plain claim/is_claimed over stored keys, no
+    migration. It holds a claim made by the previous release, as sent."""
+
+    def __init__(self, keys=()):
+        self.keys = set(keys)
+        self.claimed: list[str] = []
+
+    def claim(self, key):
+        self.claimed.append(key)
+        if key in self.keys:
+            return False
+        self.keys.add(key)
+        return True
+
+    def is_claimed(self, key):
+        return key in self.keys
+
+
+def test_a_custom_store_refuses_an_old_claim_replayed_in_the_same_spelling():
+    store = DictStore({f"nano:live {BLOCK.lower()} req_case"})
+    endpoints, _ = _endpoints(PAY_TO)
+    fac = Facilitator(FacilitatorConfig(endpoints=endpoints, claim_store=store))
+    assert fac.settle(*_pair(BLOCK.lower()))["errorReason"] == "duplicate"
+    assert store.claimed == []
+    # A new payment: the custom store is asked to claim the canonical key only.
+    assert fac.settle(*_pair(BLOCK.lower(), "req_new"))["success"] is True
+    assert store.claimed == [f"nano:live {BLOCK.upper()} req_new"]
+
+
+def test_after_a_rollback_the_previous_release_finds_the_claim(tmp_path):
+    path = str(tmp_path / "claims.db")
+    fac = _fac_on(path)
+    for spelling in (BLOCK.lower(), "aB" * 32):
+        assert fac.settle(*_pair(spelling, "rid_" + spelling[:2]))["success"] is True
+    rows = _rows(path)
+    # The previous release looked the key up exactly as sent.
+    assert f"nano:live {BLOCK.lower()} rid_ab" in rows
+    assert f"nano:live {'aB' * 32} rid_aB" in rows
+
+
+def _unmigrated(path):
+    _old_db(path)
+    assert _rows(path)  # old keys only, user_version 0
+
+
+def test_the_migration_runs_once(tmp_path):
+    path = str(tmp_path / "claims.db")
+    _unmigrated(path)
+    ClaimStore(path=path)
+    conn = sqlite3.connect(path)
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == 1
+    # A key an older release writes after the migration is not migrated again
+    conn.execute("INSERT INTO claims VALUES (?,?)", (f"nano:live {'cd' * 32} late", 9.0))
+    conn.commit()
+    conn.close()
+    ClaimStore(path=path)
+    assert f"nano:live {'CD' * 32} late" not in _rows(path)
+    # ... but a replay in the spelling it stored is still refused.
+    fac = _fac_on(path)
+    assert fac.settle(*_pair(BLOCK.lower(), "late"))["success"] is True
+    assert ClaimStore(path=path)._has_key_as_is(f"nano:live {'cd' * 32} late")
+
+
+def test_a_locked_unmigrated_file_still_opens_and_refuses_same_spelling(tmp_path):
+    path = str(tmp_path / "claims.db")
+    _unmigrated(path)
+    holder = sqlite3.connect(path)
+    holder.execute("PRAGMA journal_mode=WAL")
+    holder.execute("BEGIN IMMEDIATE")
+    try:
+        store = ClaimStore(path=path)
+        store._conn.execute("PRAGMA busy_timeout=50")
+    finally:
+        holder.rollback()
+        holder.close()
+    conn = sqlite3.connect(path)
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == 0
+    conn.close()
+    endpoints, _ = _endpoints(PAY_TO)
+    fac = Facilitator(FacilitatorConfig(endpoints=endpoints, claim_store=store))
+    assert fac.settle(*_pair(BLOCK.lower(), OLD_RID))["errorReason"] == "duplicate"
+    # The next open migrates.
+    ClaimStore(path=path)
+    assert f"nano:live {BLOCK.upper()} {OLD_RID}" in _rows(path)
+
+
+def test_a_read_only_unmigrated_file_still_opens(tmp_path):
+    path = str(tmp_path / "claims.db")
+    _unmigrated(path)
+    conn = sqlite3.connect(path)
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.close()
+
+    class ReadOnlyStore(ClaimStore):
+        def __init__(self, p):
+            self.path = p
+            import threading
+
+            self._lock = threading.Lock()
+            self._conn = sqlite3.connect(f"file:{p}?mode=ro", uri=True, check_same_thread=False)
+            self._canonicalise_existing_keys()
+
+    store = ReadOnlyStore(path)
+    assert store.is_claimed(consumption_key(BLOCK, OLD_RID)) is False  # not migrated
+    assert store._has_key_as_is(f"nano:live {BLOCK.lower()} {OLD_RID}") is True
+
+
+def test_unusual_rows_do_not_stop_the_file_opening(tmp_path):
+    path = str(tmp_path / "claims.db")
+    _old_db(path)
+    conn = sqlite3.connect(path)
+    conn.execute("INSERT INTO claims VALUES (NULL, 1.0)")
+    conn.execute("INSERT INTO claims VALUES (?, 2.0)", (f"nano:live {'ef' * 32} blob".encode(),))
+    conn.execute("INSERT INTO claims VALUES (?, 'not a time')", (f"nano:live {'ef' * 32} text_time",))
+    conn.execute("INSERT INTO claims VALUES (?, 3.0)", (f"nano:live {'Ef' * 32} text_time",))
+    conn.commit()
+    conn.close()
+    ClaimStore(path=path)
+    rows = _rows(path)
+    assert f"nano:live {'EF' * 32} text_time" in rows
+    assert f"nano:live {BLOCK.upper()} {OLD_RID}" in rows
+    assert not any(isinstance(k, str) and k == f"nano:live {'EF' * 32} blob" for k in rows)
+
+
+@pytest.mark.parametrize("key", list(OLD_KEYS) + [
+    f"nano:live {'ab' * 32}",           # no separator after the hash
+    f"nano:live {'ab' * 32}\nx",        # newline not followed by a space
+    f"nano:live {'ab' * 32}  two_spaces",
+    f"nano:live {'ab' * 32} r\u00e9q",   # non-ASCII request_id
+])
+def test_the_sql_migration_agrees_with_canonical_key(tmp_path, key):
+    from nano_mcp.facilitator import _canonical_key
+
+    path = str(tmp_path / "claims.db")
+    conn = sqlite3.connect(path)
+    conn.executescript(OLD_SCHEMA)
+    conn.execute("INSERT INTO claims VALUES (?, 1.0)", (key,))
+    conn.commit()
+    conn.close()
+    ClaimStore(path=path)
+    assert set(_rows(path)) == {key, _canonical_key(key)}

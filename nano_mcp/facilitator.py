@@ -414,6 +414,26 @@ CREATE TABLE IF NOT EXISTS claims (
 );
 """
 
+# Canonical key for each old-spelling claim: hash (chars 11-74) upper-cased, a
+# "\n" right after the hash dropped, the request_id kept as is. Only text keys
+# with a 64-hex hash followed by " " or "\n " qualify; anything else is left.
+_MIGRATE_SQL = """
+INSERT OR IGNORE INTO claims (consumption_key, claimed_at)
+SELECT 'nano:live ' || upper(substr(consumption_key, 11, 64)) ||
+       CASE WHEN substr(consumption_key, 75, 2) = char(10) || ' '
+            THEN substr(consumption_key, 76) ELSE substr(consumption_key, 75) END,
+       min(claimed_at)
+FROM claims
+WHERE typeof(consumption_key) = 'text'
+  AND substr(consumption_key, 1, 10) = 'nano:live '
+  AND length(substr(consumption_key, 11, 64)) = 64
+  AND substr(consumption_key, 11, 64) NOT GLOB '*[^0-9A-Fa-f]*'
+  AND (substr(consumption_key, 75, 1) = ' ' OR substr(consumption_key, 75, 2) = char(10) || ' ')
+  AND (substr(consumption_key, 11, 64) <> upper(substr(consumption_key, 11, 64))
+       OR substr(consumption_key, 75, 1) = char(10))
+GROUP BY 1
+"""
+
 
 class ClaimStore:
     """Atomic single-use claim keyed by `nano:live <block-hash> <request_id>`.
@@ -434,47 +454,79 @@ class ClaimStore:
         self._conn.commit()
         self._canonicalise_existing_keys()
 
+    # Bumped once the file's old-spelling claims have their canonical keys.
+    _MIGRATED_VERSION = 1
+
     def _canonicalise_existing_keys(self) -> None:
         """Give every claim stored under an older key spelling its canonical key.
 
         Keys used to carry the block hash exactly as the caller sent it (any hex
-        case, and `<hash>\n` passed the old `^...$` check). Claims now look up
-        the upper-case spelling only, so without this a payment settled before
-        the upgrade would settle once more. For each stored key whose canonical
-        form is missing, the canonical key is inserted with the original
-        claimed_at. The old row is kept: nothing looks it up any more, and
-        keeping it leaves the file valid for the previous release too.
+        case, and `<hash>\\n` passed the old `^...$` check). Claims are now
+        looked up under the upper-case spelling, so without this a payment
+        settled before the upgrade could settle once more in another spelling.
 
-        Runs on every open and is idempotent: INSERT OR IGNORE inside one
-        IMMEDIATE transaction, so concurrent openers cannot double-insert or
-        clobber a claim, and an already-migrated file does no write at all.
-        Keys that do not parse as `nano:live <64-hex> <request_id>` are left
-        untouched.
+        One INSERT OR IGNORE ... SELECT, done in SQL inside one IMMEDIATE
+        transaction: only text keys of the shape `nano:live <64-hex> <rid>`
+        whose hash is not already canonical are read; the canonical key gets the
+        earliest claimed_at; the request_id is kept byte for byte; the old row
+        is kept (the previous release looks that spelling up). Completion is
+        recorded in PRAGMA user_version, so later opens skip it.
+
+        It never fails the open. If the file is read-only, or another writer
+        holds the lock past busy_timeout, the migration is skipped and retried
+        on the next open; meanwhile Facilitator.settle still refuses a replay
+        in the spelling that was stored, because it also looks the key up
+        exactly as sent. What it cannot cover: a payment claimed in one
+        spelling by an older release and replayed in another spelling before
+        the migration has run, and claims an older release writes into this
+        file after the migration is recorded (same-spelling replays of those
+        are still refused).
         """
         with self._lock:
-            rows = self._conn.execute(
-                "SELECT consumption_key, claimed_at FROM claims"
-            ).fetchall()
-            present = {key for key, _ in rows}
-            missing: dict[str, float] = {}
-            for key, claimed_at in rows:
-                canonical = _canonical_key(key)
-                if canonical == key or canonical in present:
-                    continue
-                if canonical not in missing or claimed_at < missing[canonical]:
-                    missing[canonical] = claimed_at
-            if not missing:
-                return
             try:
+                version = self._conn.execute("PRAGMA user_version").fetchone()[0]
+                if version >= self._MIGRATED_VERSION:
+                    return
                 self._conn.execute("BEGIN IMMEDIATE")
-                self._conn.executemany(
-                    "INSERT OR IGNORE INTO claims (consumption_key, claimed_at) VALUES (?,?)",
-                    sorted(missing.items()),
+                try:
+                    self._conn.execute(_MIGRATE_SQL)
+                    self._conn.execute(f"PRAGMA user_version={self._MIGRATED_VERSION}")
+                    self._conn.commit()
+                except BaseException:
+                    self._conn.rollback()
+                    raise
+            except sqlite3.Error:
+                return
+
+    def _claim_spellings(self, canonical: str, as_sent: str) -> bool:
+        """claim(canonical), also recording the key as sent (when it differs)
+        in the same transaction, so the previous release finds the claim."""
+        with self._lock:
+            try:
+                import time
+
+                now = time.time()
+                self._conn.execute(
+                    "INSERT INTO claims (consumption_key, claimed_at) VALUES (?,?)",
+                    (canonical, now),
                 )
+                if as_sent != canonical:
+                    self._conn.execute(
+                        "INSERT OR IGNORE INTO claims (consumption_key, claimed_at) VALUES (?,?)",
+                        (as_sent, now),
+                    )
                 self._conn.commit()
-            except BaseException:
+                return True
+            except sqlite3.IntegrityError:
                 self._conn.rollback()
-                raise
+                return False
+
+    def _has_key_as_is(self, key: str) -> bool:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT 1 FROM claims WHERE consumption_key=?", (key,)
+            ).fetchone()
+        return row is not None
 
     def claim(self, consumption_key: str) -> bool:
         with self._lock:
@@ -647,7 +699,7 @@ class Facilitator:
         # `extra` is absent, null or an object here (_check_requirements).
         request_id = str((requirements.get("extra") or {}).get("requestId") or "")
         key = consumption_key(proof, request_id)
-        if not self.claim_store.claim(key):
+        if not self._claim(key, f"{_KEY_PREFIX}{proof} {request_id}"):
             return {
                 "success": False,
                 "errorReason": "duplicate",
@@ -664,6 +716,29 @@ class Facilitator:
             "payer": send["payer"],
             "amount": send["amount"],
         }
+
+    def _claim(self, key: str, as_sent: str) -> bool:
+        """Claim the canonical key once. A claim recorded under the key exactly
+        as sent (by an older release, or in a store that was never migrated)
+        also counts as spent. The built-in ClaimStore records both spellings;
+        a custom store is only ever asked to claim the canonical key."""
+        store = self.claim_store
+        builtin = (
+            isinstance(store, ClaimStore)
+            and type(store).claim is ClaimStore.claim
+            and type(store).is_claimed is ClaimStore.is_claimed
+        )
+        if as_sent != key:
+            if builtin:
+                if store._has_key_as_is(as_sent):
+                    return False
+            else:
+                is_claimed = getattr(store, "is_claimed", None)
+                if is_claimed is not None and is_claimed(as_sent):
+                    return False
+        if builtin:
+            return store._claim_spellings(key, as_sent)
+        return store.claim(key)
 
     def _check_requirements(self, requirements: dict, payload: dict) -> dict | None:
         # Both halves have to be objects before anything is read off them. The
