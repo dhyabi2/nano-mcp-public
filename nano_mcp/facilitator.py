@@ -423,10 +423,8 @@ CREATE TABLE IF NOT EXISTS claims (
 _CANONICAL_SQL = """'nano:live ' || upper(substr(c.consumption_key, 11, 64)) ||
        CASE WHEN substr(c.consumption_key, 75, 2) = char(10) || ' '
             THEN substr(c.consumption_key, 76) ELSE substr(c.consumption_key, 75) END"""
-_MIGRATE_SQL = f"""
-INSERT OR IGNORE INTO claims (consumption_key, claimed_at)
-SELECT {_CANONICAL_SQL}, min(c.claimed_at)
-FROM claims AS c
+# Old-spelling rows that still lack their canonical copy.
+_PENDING_WHERE = f"""
 WHERE typeof(c.consumption_key) = 'text'
   AND substr(c.consumption_key, 1, 10) = 'nano:live '
   AND (substr(c.consumption_key, 11, 64) <> upper(substr(c.consumption_key, 11, 64))
@@ -436,7 +434,24 @@ WHERE typeof(c.consumption_key) = 'text'
   AND CASE WHEN EXISTS (SELECT 1 FROM claims AS k WHERE k.consumption_key = {_CANONICAL_SQL})
            THEN 0
            ELSE substr(c.consumption_key, 11, 64) NOT GLOB '*[^0-9A-Fa-f]*' END
+"""
+# Read-only: is there anything to migrate? Run on every open before any lock.
+_NEEDS_MIGRATION_SQL = f"SELECT 1 FROM claims AS c {_PENDING_WHERE} LIMIT 1"
+_MIGRATE_SQL = f"""
+INSERT OR IGNORE INTO claims (consumption_key, claimed_at)
+SELECT {_CANONICAL_SQL}, min(c.claimed_at)
+FROM claims AS c
+{_PENDING_WHERE}
 GROUP BY 1
+"""
+# While a file is unmigrated: is this canonical key stored under any older
+# spelling (any hex case, or "<hash>\n")? A full scan, used only then.
+_OLD_SPELLING_SQL = f"""
+SELECT 1 FROM claims AS c
+WHERE typeof(c.consumption_key) = 'text'
+  AND substr(c.consumption_key, 1, 10) = 'nano:live '
+  AND {_CANONICAL_SQL} = ?
+LIMIT 1
 """
 
 
@@ -449,6 +464,7 @@ class ClaimStore:
             os.path.dirname(os.path.abspath(__file__)), "claims.db"
         )
         self._lock = threading.Lock()
+        self._migration_pending = True
         self._conn = sqlite3.connect(self.path, check_same_thread=False)
         # WAL + busy timeout so a second handle to the same file (e.g. a test or
         # a second facilitator process) does not immediately raise
@@ -467,78 +483,87 @@ class ClaimStore:
         looked up under the upper-case spelling, so without this a payment
         settled before the upgrade could settle once more in another spelling.
 
-        One INSERT OR IGNORE ... SELECT, done in SQL inside one IMMEDIATE
-        transaction: only text keys of the shape `nano:live <64-hex> <rid>`
-        whose hash is not already canonical are read; the canonical key gets the
-        earliest claimed_at; the request_id is kept byte for byte; the old row
-        is kept (the previous release looks that spelling up).
-
-        It runs on every open, not once: after a rollback to the previous
-        release and a roll-forward, the claims the previous release wrote in
-        between get their canonical keys too. No marker is stored, so the
-        file's PRAGMA user_version is left as the user set it. Rows already
-        migrated are ignored by INSERT OR IGNORE.
+        Every open first runs one read-only `SELECT 1 ... LIMIT 1` for an
+        old-spelling row that lacks its canonical copy; no lock is taken and
+        nothing is written when there is none. Only then does one INSERT OR
+        IGNORE ... SELECT run, in SQL inside one IMMEDIATE transaction: the
+        canonical key gets the earliest claimed_at, the request_id is kept byte
+        for byte, the old row is kept (the previous release looks that
+        spelling up). Running on every open also covers claims the previous
+        release wrote during a rollback. PRAGMA user_version is not used.
 
         It never fails the open. If the file is read-only, or another writer
-        holds the lock past busy_timeout, the migration is skipped and retried
-        on the next open; meanwhile Facilitator.settle still refuses a replay
-        in the spelling that was stored, because it also looks the key up
-        exactly as sent. What it cannot cover: a payment claimed in one
-        spelling by an older release and replayed in another spelling before
-        the next open, i.e. an older and a newer release writing one file at
-        the same time.
+        holds the lock past busy_timeout, the store remembers that the
+        migration is pending and retries it before its next claim; while it
+        still cannot run, a claim first looks the canonical key up under any
+        older spelling (a full scan), so a pre-upgrade claim is never settled
+        twice by this release.
         """
         with self._lock:
-            try:
-                self._conn.execute("BEGIN IMMEDIATE")
-                try:
-                    self._conn.execute(_MIGRATE_SQL)
-                    self._conn.commit()
-                except BaseException:
-                    self._conn.rollback()
-                    raise
-            except sqlite3.Error:
-                return
+            self._migrate_locked()
 
-    def _claim_spellings(self, canonical: str, as_sent: str) -> bool:
-        """claim(canonical), also recording the key as sent (when it differs)
-        in the same transaction, so the previous release finds the claim."""
+    def _migrate_locked(self) -> None:
+        self._migration_pending = True
+        try:
+            needed = self._conn.execute(_NEEDS_MIGRATION_SQL).fetchone() is not None
+        except sqlite3.Error:
+            return
+        if not needed:
+            self._migration_pending = False
+            return
+        try:
+            self._conn.execute("BEGIN IMMEDIATE")
+            try:
+                self._conn.execute(_MIGRATE_SQL)
+                self._conn.commit()
+            except BaseException:
+                self._conn.rollback()
+                raise
+        except sqlite3.Error:
+            return
+        self._migration_pending = False
+
+    def _held_under_old_spelling(self, canonical: str) -> bool:
+        return self._conn.execute(_OLD_SPELLING_SQL, (canonical,)).fetchone() is not None
+
+    def _claim_spellings(self, canonical: str, as_sent: str | None = None) -> bool:
+        """Claim `canonical` once; True if this call won it.
+
+        A migration skipped at open is retried first; if it still cannot run,
+        a claim held under any older spelling of the key counts as spent.
+        With `as_sent` (the key spelt as the caller sent it, used by settle on
+        the built-in store) a row stored under exactly that key also counts as
+        spent, and a new claim is recorded under it too (same transaction), so
+        the previous release finds it after a rollback."""
         with self._lock:
+            if getattr(self, "_migration_pending", True):
+                self._migrate_locked()
+            pending = self._migration_pending
+            other = as_sent if as_sent is not None and as_sent != canonical else None
             try:
                 import time
 
+                if pending or other is not None:
+                    # Check and insert in one write transaction.
+                    self._conn.execute("BEGIN IMMEDIATE")
+                    if pending and self._held_under_old_spelling(canonical):
+                        self._conn.rollback()
+                        return False
+                    if other is not None and self._conn.execute(
+                        "SELECT 1 FROM claims WHERE consumption_key=?", (other,)
+                    ).fetchone() is not None:
+                        self._conn.rollback()
+                        return False
                 now = time.time()
                 self._conn.execute(
                     "INSERT INTO claims (consumption_key, claimed_at) VALUES (?,?)",
                     (canonical, now),
                 )
-                if as_sent != canonical:
+                if other is not None:
                     self._conn.execute(
                         "INSERT OR IGNORE INTO claims (consumption_key, claimed_at) VALUES (?,?)",
-                        (as_sent, now),
+                        (other, now),
                     )
-                self._conn.commit()
-                return True
-            except sqlite3.IntegrityError:
-                self._conn.rollback()
-                return False
-
-    def _has_key_as_is(self, key: str) -> bool:
-        with self._lock:
-            row = self._conn.execute(
-                "SELECT 1 FROM claims WHERE consumption_key=?", (key,)
-            ).fetchone()
-        return row is not None
-
-    def claim(self, consumption_key: str) -> bool:
-        with self._lock:
-            try:
-                import time
-
-                self._conn.execute(
-                    "INSERT INTO claims (consumption_key, claimed_at) VALUES (?,?)",
-                    (_canonical_key(consumption_key), time.time()),
-                )
                 self._conn.commit()
                 return True
             except sqlite3.IntegrityError:
@@ -547,13 +572,22 @@ class ClaimStore:
                 # (which would block a second handle to the same file).
                 self._conn.rollback()
                 return False
+            except BaseException:
+                if self._conn.in_transaction:
+                    self._conn.rollback()
+                raise
+
+    def claim(self, consumption_key: str) -> bool:
+        return self._claim_spellings(_canonical_key(consumption_key))
 
     def is_claimed(self, consumption_key: str) -> bool:
+        canonical = _canonical_key(consumption_key)
         with self._lock:
             row = self._conn.execute(
-                "SELECT 1 FROM claims WHERE consumption_key=?",
-                (_canonical_key(consumption_key),),
+                "SELECT 1 FROM claims WHERE consumption_key=?", (canonical,)
             ).fetchone()
+            if row is None and getattr(self, "_migration_pending", True):
+                return self._held_under_old_spelling(canonical)
         return row is not None
 
 
@@ -701,13 +735,11 @@ class Facilitator:
         # `extra` is absent, null or an object here (_check_requirements).
         request_id = str((requirements.get("extra") or {}).get("requestId") or "")
         key = consumption_key(proof, request_id)
-        refusal = self._claim(key, f"{_KEY_PREFIX}{proof} {request_id}")
-        if refusal is not None:
-            reason, message = refusal
+        if not self._claim(key, f"{_KEY_PREFIX}{proof} {request_id}"):
             return {
                 "success": False,
-                "errorReason": reason,
-                "errorMessage": message,
+                "errorReason": "duplicate",
+                "errorMessage": "paymentProof already claimed for this request",
                 "transaction": proof,
                 "network": self.network,
             }
@@ -721,50 +753,29 @@ class Facilitator:
             "amount": send["amount"],
         }
 
-    _DUPLICATE = ("duplicate", "paymentProof already claimed for this request")
+    def _claim(self, key: str, as_sent: str) -> bool:
+        """Claim the canonical key once; True if this settle won it.
 
-    def _claim(self, key: str, as_sent: str) -> tuple[str, str] | None:
-        """Claim the canonical key once; None on success, else (errorReason,
-        errorMessage). A claim recorded under the key exactly as sent (by an
-        older release, or in a store that was never migrated) also counts as
-        spent.
+        The built-in ClaimStore backend (a ClaimStore, or a subclass that ran
+        ClaimStore.__init__ and does not override claim()) also refuses a claim
+        stored under the key exactly as sent, and records a new claim under that
+        key too, in the same transaction, so the previous release finds it
+        after a rollback.
 
-        The built-in ClaimStore (and any subclass of it) is checked for the
-        as-sent key with a raw lookup, `_has_key_as_is`, so a subclass that
-        overrides only claim() is still checked. Unless claim() is overridden,
-        both spellings are recorded in one transaction.
-
-        A custom store, for a proof not spelt in upper case, is first asked
-        `is_claimed(as_sent)` when it has one, then `claim(as_sent)`, then
-        `claim(canonical)`; a False from either claim is a duplicate. So a store
-        without is_claimed still refuses a claim an older release stored under
-        the as-sent key. If is_claimed raises (wrong signature, not callable,
-        refuses the key, store down) settle refuses; it never succeeds on an
-        error."""
+        Any other store, including a ClaimStore subclass that overrides claim()
+        or brings its own backend, gets one call, `claim(<canonical key>)`,
+        exactly as main called it with the key as sent. It is not asked
+        is_claimed and is not given the as-sent key; keys it holds from a
+        previous release are its owner's to migrate (README, Upgrade notes)."""
         store = self.claim_store
-        if isinstance(store, ClaimStore):
-            if as_sent != key and store._has_key_as_is(as_sent):
-                return self._DUPLICATE
-            if type(store).claim is ClaimStore.claim:
-                ok = store._claim_spellings(key, as_sent)
-            else:
-                ok = store.claim(key)
-            return None if ok else self._DUPLICATE
-        if as_sent != key:
-            is_claimed = getattr(store, "is_claimed", None)
-            if is_claimed is not None:
-                try:
-                    spent = is_claimed(as_sent)
-                except Exception:  # noqa: BLE001 - fail closed on any store error
-                    return (
-                        "claim_store_error",
-                        "the claim store could not check this paymentProof",
-                    )
-                if spent:
-                    return self._DUPLICATE
-            if not store.claim(as_sent):
-                return self._DUPLICATE
-        return None if store.claim(key) else self._DUPLICATE
+        if (
+            isinstance(store, ClaimStore)
+            and type(store).claim is ClaimStore.claim
+            and isinstance(getattr(store, "_conn", None), sqlite3.Connection)
+            and getattr(store, "_lock", None) is not None
+        ):
+            return store._claim_spellings(key, as_sent)
+        return bool(store.claim(key))
 
     def _check_requirements(self, requirements: dict, payload: dict) -> dict | None:
         # Both halves have to be objects before anything is read off them. The

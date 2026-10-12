@@ -28,7 +28,7 @@ NANO_PAYMENT_MASTER_SECRET=$(python3 -c "import os;print(os.urandom(32).hex())")
 # 2. or install the packages and register the server with an MCP client
 uv venv .venv && source .venv/bin/activate
 uv pip install -e ".[dev]"
-python -m pytest -m "not network"        # 340 offline tests collected; 3 journal-plugin modules skip (not in this release)
+python -m pytest -m "not network"        # 380 offline tests collected; 3 journal-plugin modules skip (not in this release)
 
 # 3. installing the package puts the server on PATH as `nano-mcp` -- this is the
 #    command an MCP client config starts, and the one the registry entry means
@@ -107,27 +107,42 @@ python -m pytest                    # includes live rpc.nano.to reads
 - `consumption_key(block_hash, request_id)` now returns the hash upper-cased
   (the request_id is unchanged, and stays case-sensitive). `ClaimStore.claim`
   and `is_claimed` normalise the hash the same way.
-- A custom `claim_store` receives both keys for a proof that is not spelt in
-  upper case: `settle` asks its `is_claimed` (if it has one) about the key
-  spelt exactly as sent, then calls `claim(<key as sent>)` and, only if that
-  returns True, `claim(<canonical key>)`. A False from either is a duplicate,
-  so a claim the store holds under an older spelling still counts even without
-  `is_claimed`. The store must keep keys as given (not normalise them itself).
-  An upper-case proof is claimed once, under the canonical key. If `is_claimed`
-  raises (wrong signature, not callable, refuses the key), `settle` refuses
-  with `errorReason: "claim_store_error"`; it does not raise or succeed.
-- The built-in `ClaimStore` migrates an existing `claims.db` on every open: each
-  old-spelling key also gets its canonical key (old rows are kept). It runs on
-  every open, not once, so after a rollback and roll-forward the claims the
-  previous release wrote in between are covered too; `PRAGMA user_version` is
-  not used or changed. If the file is read-only or locked, the open still
-  succeeds and the migration is retried on the next open. New claims are also
-  stored under the key as sent, so a rollback to the previous release still
-  finds them.
-- The first open of a large old file does the real work once (about 1 s for
-  100,000 lower-case claims) and roughly doubles the claims table, since each
-  old row gains a canonical copy. Later opens re-check those old rows (about
-  0.4 s per 100,000) and write nothing new unless a row lacks its copy.
+- **Upgrade step for a custom `claim_store`.** `settle` calls its `claim()`
+  exactly once, with the canonical key (hash upper-cased), the same call as
+  before except for the key. It never calls `is_claimed` and never passes the
+  key as sent. Keys your store holds from a previous release are in whatever
+  case the payer sent, so before upgrading add the upper-case form of each
+  (keep the old keys), or a payment settled before the upgrade can be settled
+  once more in upper case:
+
+  ```python
+  import re
+  old = re.compile(r"nano:live ([0-9A-Fa-f]{64})\n? (.*)", re.S)
+  for key in list(my_store_keys()):            # every key the store holds
+      m = old.fullmatch(key)
+      if m:
+          my_store_add(f"nano:live {m[1].upper()} {m[2]}")
+  ```
+
+  The same applies to a `ClaimStore` subclass that overrides `claim()` or does
+  not run `ClaimStore.__init__` (its own backend): it is treated as a custom
+  store.
+- The built-in `ClaimStore` migrates an existing `claims.db` itself. Every open
+  first runs a cheap read-only check for an old-spelling key that lacks its
+  canonical copy; only if one exists does it take the write lock and add the
+  canonical keys (old rows are kept; `PRAGMA user_version` is not used). This
+  also covers claims a previous release wrote during a rollback. If the file
+  is locked or read-only, the open still succeeds, the store remembers the
+  migration is pending and retries it before its next claim, and while it still
+  cannot run each claim also looks the key up under any older spelling.
+- Settled through the built-in `ClaimStore` (or a subclass that runs
+  `ClaimStore.__init__` and does not override `claim()`), a proof not spelt in
+  upper case is also stored under the key exactly as sent, so a rollback to the
+  previous release still refuses it. Calling `ClaimStore.claim()` directly
+  stores the canonical key only.
+- The first open of a large old file does the work once (about 1 s for 100,000
+  lower-case claims) and roughly doubles the claims table. Later opens only
+  read (about 0.25 s per 100,000 old rows) and take no write lock.
 - Not protected: a mixed fleet, i.e. the previous and this release writing one
   claim store at the same time. A payment the previous release claims in one
   spelling can settle once more through this release in another spelling until
