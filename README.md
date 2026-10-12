@@ -28,7 +28,7 @@ NANO_PAYMENT_MASTER_SECRET=$(python3 -c "import os;print(os.urandom(32).hex())")
 # 2. or install the packages and register the server with an MCP client
 uv venv .venv && source .venv/bin/activate
 uv pip install -e ".[dev]"
-python -m pytest -m "not network"        # 322 offline tests collected; 3 journal-plugin modules skip (not in this release)
+python -m pytest -m "not network"        # 340 offline tests collected; 3 journal-plugin modules skip (not in this release)
 
 # 3. installing the package puts the server on PATH as `nano-mcp` -- this is the
 #    command an MCP client config starts, and the one the registry entry means
@@ -106,16 +106,32 @@ python -m pytest                    # includes live rpc.nano.to reads
   hash as sent, and `transaction` in verify/settle responses echoes it as sent.
 - `consumption_key(block_hash, request_id)` now returns the hash upper-cased
   (the request_id is unchanged, and stays case-sensitive). `ClaimStore.claim`
-  and `is_claimed` normalise the hash the same way. A custom `claim_store` is
-  asked to claim the canonical (upper-case) key; before that, `settle` also asks
-  its `is_claimed` about the key spelt exactly as sent, so a claim it stored
-  under an older spelling still counts.
-- The built-in `ClaimStore` migrates an existing `claims.db` once, on open: each
-  old-spelling key also gets its canonical key (old rows are kept), and
-  `PRAGMA user_version` records that it ran. If the file is read-only or locked,
-  the open still succeeds and the migration is retried on the next open. New
-  claims are also stored under the key as sent, so a rollback to the previous
-  release still finds them.
+  and `is_claimed` normalise the hash the same way.
+- A custom `claim_store` receives both keys for a proof that is not spelt in
+  upper case: `settle` asks its `is_claimed` (if it has one) about the key
+  spelt exactly as sent, then calls `claim(<key as sent>)` and, only if that
+  returns True, `claim(<canonical key>)`. A False from either is a duplicate,
+  so a claim the store holds under an older spelling still counts even without
+  `is_claimed`. The store must keep keys as given (not normalise them itself).
+  An upper-case proof is claimed once, under the canonical key. If `is_claimed`
+  raises (wrong signature, not callable, refuses the key), `settle` refuses
+  with `errorReason: "claim_store_error"`; it does not raise or succeed.
+- The built-in `ClaimStore` migrates an existing `claims.db` on every open: each
+  old-spelling key also gets its canonical key (old rows are kept). It runs on
+  every open, not once, so after a rollback and roll-forward the claims the
+  previous release wrote in between are covered too; `PRAGMA user_version` is
+  not used or changed. If the file is read-only or locked, the open still
+  succeeds and the migration is retried on the next open. New claims are also
+  stored under the key as sent, so a rollback to the previous release still
+  finds them.
+- The first open of a large old file does the real work once (about 1 s for
+  100,000 lower-case claims) and roughly doubles the claims table, since each
+  old row gains a canonical copy. Later opens re-check those old rows (about
+  0.4 s per 100,000) and write nothing new unless a row lacks its copy.
+- Not protected: a mixed fleet, i.e. the previous and this release writing one
+  claim store at the same time. A payment the previous release claims in one
+  spelling can settle once more through this release in another spelling until
+  the store is next opened by this release. Upgrade every writer together.
 - A `paymentProof` with a trailing newline (or any other character outside the
   64 hex digits) is refused.
 - `PaidToolServer.execute` (`paid_tool_execute`) returns an `invalid` refusal

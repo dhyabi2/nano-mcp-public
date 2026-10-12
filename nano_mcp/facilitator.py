@@ -417,20 +417,25 @@ CREATE TABLE IF NOT EXISTS claims (
 # Canonical key for each old-spelling claim: hash (chars 11-74) upper-cased, a
 # "\n" right after the hash dropped, the request_id kept as is. Only text keys
 # with a 64-hex hash followed by " " or "\n " qualify; anything else is left.
-_MIGRATE_SQL = """
+# It runs on every open, so rows whose canonical key already exists are dropped
+# early (EXISTS, a primary-key lookup) before the costlier hex GLOB; the CASE
+# keeps SQLite from evaluating the GLOB first.
+_CANONICAL_SQL = """'nano:live ' || upper(substr(c.consumption_key, 11, 64)) ||
+       CASE WHEN substr(c.consumption_key, 75, 2) = char(10) || ' '
+            THEN substr(c.consumption_key, 76) ELSE substr(c.consumption_key, 75) END"""
+_MIGRATE_SQL = f"""
 INSERT OR IGNORE INTO claims (consumption_key, claimed_at)
-SELECT 'nano:live ' || upper(substr(consumption_key, 11, 64)) ||
-       CASE WHEN substr(consumption_key, 75, 2) = char(10) || ' '
-            THEN substr(consumption_key, 76) ELSE substr(consumption_key, 75) END,
-       min(claimed_at)
-FROM claims
-WHERE typeof(consumption_key) = 'text'
-  AND substr(consumption_key, 1, 10) = 'nano:live '
-  AND length(substr(consumption_key, 11, 64)) = 64
-  AND substr(consumption_key, 11, 64) NOT GLOB '*[^0-9A-Fa-f]*'
-  AND (substr(consumption_key, 75, 1) = ' ' OR substr(consumption_key, 75, 2) = char(10) || ' ')
-  AND (substr(consumption_key, 11, 64) <> upper(substr(consumption_key, 11, 64))
-       OR substr(consumption_key, 75, 1) = char(10))
+SELECT {_CANONICAL_SQL}, min(c.claimed_at)
+FROM claims AS c
+WHERE typeof(c.consumption_key) = 'text'
+  AND substr(c.consumption_key, 1, 10) = 'nano:live '
+  AND (substr(c.consumption_key, 11, 64) <> upper(substr(c.consumption_key, 11, 64))
+       OR substr(c.consumption_key, 75, 1) = char(10))
+  AND (substr(c.consumption_key, 75, 1) = ' ' OR substr(c.consumption_key, 75, 2) = char(10) || ' ')
+  AND length(substr(c.consumption_key, 11, 64)) = 64
+  AND CASE WHEN EXISTS (SELECT 1 FROM claims AS k WHERE k.consumption_key = {_CANONICAL_SQL})
+           THEN 0
+           ELSE substr(c.consumption_key, 11, 64) NOT GLOB '*[^0-9A-Fa-f]*' END
 GROUP BY 1
 """
 
@@ -454,9 +459,6 @@ class ClaimStore:
         self._conn.commit()
         self._canonicalise_existing_keys()
 
-    # Bumped once the file's old-spelling claims have their canonical keys.
-    _MIGRATED_VERSION = 1
-
     def _canonicalise_existing_keys(self) -> None:
         """Give every claim stored under an older key spelling its canonical key.
 
@@ -469,8 +471,13 @@ class ClaimStore:
         transaction: only text keys of the shape `nano:live <64-hex> <rid>`
         whose hash is not already canonical are read; the canonical key gets the
         earliest claimed_at; the request_id is kept byte for byte; the old row
-        is kept (the previous release looks that spelling up). Completion is
-        recorded in PRAGMA user_version, so later opens skip it.
+        is kept (the previous release looks that spelling up).
+
+        It runs on every open, not once: after a rollback to the previous
+        release and a roll-forward, the claims the previous release wrote in
+        between get their canonical keys too. No marker is stored, so the
+        file's PRAGMA user_version is left as the user set it. Rows already
+        migrated are ignored by INSERT OR IGNORE.
 
         It never fails the open. If the file is read-only, or another writer
         holds the lock past busy_timeout, the migration is skipped and retried
@@ -478,19 +485,14 @@ class ClaimStore:
         in the spelling that was stored, because it also looks the key up
         exactly as sent. What it cannot cover: a payment claimed in one
         spelling by an older release and replayed in another spelling before
-        the migration has run, and claims an older release writes into this
-        file after the migration is recorded (same-spelling replays of those
-        are still refused).
+        the next open, i.e. an older and a newer release writing one file at
+        the same time.
         """
         with self._lock:
             try:
-                version = self._conn.execute("PRAGMA user_version").fetchone()[0]
-                if version >= self._MIGRATED_VERSION:
-                    return
                 self._conn.execute("BEGIN IMMEDIATE")
                 try:
                     self._conn.execute(_MIGRATE_SQL)
-                    self._conn.execute(f"PRAGMA user_version={self._MIGRATED_VERSION}")
                     self._conn.commit()
                 except BaseException:
                     self._conn.rollback()
@@ -699,11 +701,13 @@ class Facilitator:
         # `extra` is absent, null or an object here (_check_requirements).
         request_id = str((requirements.get("extra") or {}).get("requestId") or "")
         key = consumption_key(proof, request_id)
-        if not self._claim(key, f"{_KEY_PREFIX}{proof} {request_id}"):
+        refusal = self._claim(key, f"{_KEY_PREFIX}{proof} {request_id}")
+        if refusal is not None:
+            reason, message = refusal
             return {
                 "success": False,
-                "errorReason": "duplicate",
-                "errorMessage": "paymentProof already claimed for this request",
+                "errorReason": reason,
+                "errorMessage": message,
                 "transaction": proof,
                 "network": self.network,
             }
@@ -717,28 +721,50 @@ class Facilitator:
             "amount": send["amount"],
         }
 
-    def _claim(self, key: str, as_sent: str) -> bool:
-        """Claim the canonical key once. A claim recorded under the key exactly
-        as sent (by an older release, or in a store that was never migrated)
-        also counts as spent. The built-in ClaimStore records both spellings;
-        a custom store is only ever asked to claim the canonical key."""
+    _DUPLICATE = ("duplicate", "paymentProof already claimed for this request")
+
+    def _claim(self, key: str, as_sent: str) -> tuple[str, str] | None:
+        """Claim the canonical key once; None on success, else (errorReason,
+        errorMessage). A claim recorded under the key exactly as sent (by an
+        older release, or in a store that was never migrated) also counts as
+        spent.
+
+        The built-in ClaimStore (and any subclass of it) is checked for the
+        as-sent key with a raw lookup, `_has_key_as_is`, so a subclass that
+        overrides only claim() is still checked. Unless claim() is overridden,
+        both spellings are recorded in one transaction.
+
+        A custom store, for a proof not spelt in upper case, is first asked
+        `is_claimed(as_sent)` when it has one, then `claim(as_sent)`, then
+        `claim(canonical)`; a False from either claim is a duplicate. So a store
+        without is_claimed still refuses a claim an older release stored under
+        the as-sent key. If is_claimed raises (wrong signature, not callable,
+        refuses the key, store down) settle refuses; it never succeeds on an
+        error."""
         store = self.claim_store
-        builtin = (
-            isinstance(store, ClaimStore)
-            and type(store).claim is ClaimStore.claim
-            and type(store).is_claimed is ClaimStore.is_claimed
-        )
-        if as_sent != key:
-            if builtin:
-                if store._has_key_as_is(as_sent):
-                    return False
+        if isinstance(store, ClaimStore):
+            if as_sent != key and store._has_key_as_is(as_sent):
+                return self._DUPLICATE
+            if type(store).claim is ClaimStore.claim:
+                ok = store._claim_spellings(key, as_sent)
             else:
-                is_claimed = getattr(store, "is_claimed", None)
-                if is_claimed is not None and is_claimed(as_sent):
-                    return False
-        if builtin:
-            return store._claim_spellings(key, as_sent)
-        return store.claim(key)
+                ok = store.claim(key)
+            return None if ok else self._DUPLICATE
+        if as_sent != key:
+            is_claimed = getattr(store, "is_claimed", None)
+            if is_claimed is not None:
+                try:
+                    spent = is_claimed(as_sent)
+                except Exception:  # noqa: BLE001 - fail closed on any store error
+                    return (
+                        "claim_store_error",
+                        "the claim store could not check this paymentProof",
+                    )
+                if spent:
+                    return self._DUPLICATE
+            if not store.claim(as_sent):
+                return self._DUPLICATE
+        return None if store.claim(key) else self._DUPLICATE
 
     def _check_requirements(self, requirements: dict, payload: dict) -> dict | None:
         # Both halves have to be objects before anything is read off them. The

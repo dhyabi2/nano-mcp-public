@@ -383,9 +383,17 @@ def test_a_custom_store_refuses_an_old_claim_replayed_in_the_same_spelling():
     fac = Facilitator(FacilitatorConfig(endpoints=endpoints, claim_store=store))
     assert fac.settle(*_pair(BLOCK.lower()))["errorReason"] == "duplicate"
     assert store.claimed == []
-    # A new payment: the custom store is asked to claim the canonical key only.
+    # A new payment spelt in lower case: the custom store is asked to claim the
+    # key as sent first, then the canonical key.
     assert fac.settle(*_pair(BLOCK.lower(), "req_new"))["success"] is True
-    assert store.claimed == [f"nano:live {BLOCK.upper()} req_new"]
+    assert store.claimed == [
+        f"nano:live {BLOCK.lower()} req_new",
+        f"nano:live {BLOCK.upper()} req_new",
+    ]
+    # An upper-case proof is already canonical: one claim.
+    store.claimed.clear()
+    assert fac.settle(*_pair(BLOCK.upper(), "req_up"))["success"] is True
+    assert store.claimed == [f"nano:live {BLOCK.upper()} req_up"]
 
 
 def test_after_a_rollback_the_previous_release_finds_the_claim(tmp_path):
@@ -404,22 +412,38 @@ def _unmigrated(path):
     assert _rows(path)  # old keys only, user_version 0
 
 
-def test_the_migration_runs_once(tmp_path):
+def test_claims_written_during_a_rollback_are_migrated_on_the_next_open(tmp_path):
+    """Upgrade, roll back (the previous release writes a lower-case claim),
+    roll forward: the claim written during the rollback is spent in every
+    spelling."""
     path = str(tmp_path / "claims.db")
     _unmigrated(path)
     ClaimStore(path=path)
     conn = sqlite3.connect(path)
-    assert conn.execute("PRAGMA user_version").fetchone()[0] == 1
-    # A key an older release writes after the migration is not migrated again
-    conn.execute("INSERT INTO claims VALUES (?,?)", (f"nano:live {'cd' * 32} late", 9.0))
+    conn.execute("INSERT INTO claims VALUES (?,?)", (f"nano:live {BLOCK.lower()} late", 9.0))
     conn.commit()
     conn.close()
-    ClaimStore(path=path)
-    assert f"nano:live {'CD' * 32} late" not in _rows(path)
-    # ... but a replay in the spelling it stored is still refused.
     fac = _fac_on(path)
-    assert fac.settle(*_pair(BLOCK.lower(), "late"))["success"] is True
-    assert ClaimStore(path=path)._has_key_as_is(f"nano:live {'cd' * 32} late")
+    assert f"nano:live {BLOCK.upper()} late" in _rows(path)
+    for spelling in SPELLINGS:
+        assert fac.settle(*_pair(spelling, "late"))["errorReason"] == "duplicate"
+
+
+@pytest.mark.parametrize("user_version", [0, 1, 7])
+def test_the_users_user_version_is_left_alone_and_does_not_skip_the_migration(
+    tmp_path, user_version
+):
+    path = str(tmp_path / "claims.db")
+    _old_db(path)
+    conn = sqlite3.connect(path)
+    conn.execute(f"PRAGMA user_version={user_version}")
+    conn.commit()
+    conn.close()
+    fac = _fac_on(path)
+    conn = sqlite3.connect(path)
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == user_version
+    conn.close()
+    assert fac.settle(*_pair(BLOCK.upper(), OLD_RID))["errorReason"] == "duplicate"
 
 
 def test_a_locked_unmigrated_file_still_opens_and_refuses_same_spelling(tmp_path):
@@ -500,3 +524,114 @@ def test_the_sql_migration_agrees_with_canonical_key(tmp_path, key):
     conn.close()
     ClaimStore(path=path)
     assert set(_rows(path)) == {key, _canonical_key(key)}
+
+
+# ------------------------------------------------ custom stores, fail closed
+
+
+class ClaimOnlyStore:
+    """A custom store with claim() only, no is_claimed(). It holds a claim the
+    previous release stored under the lower-case key."""
+
+    def __init__(self, keys=()):
+        self.keys = set(keys)
+        self.claimed: list[str] = []
+
+    def claim(self, key):
+        self.claimed.append(key)
+        if key in self.keys:
+            return False
+        self.keys.add(key)
+        return True
+
+
+def _fac_with(store):
+    endpoints, _ = _endpoints(PAY_TO)
+    return Facilitator(FacilitatorConfig(endpoints=endpoints, claim_store=store))
+
+
+@pytest.mark.parametrize("spelling", [BLOCK.lower(), "Ab" * 32], ids=["lower", "mixed"])
+def test_a_store_without_is_claimed_refuses_an_old_claim_in_the_same_spelling(spelling):
+    store = ClaimOnlyStore({f"nano:live {spelling} req_case"})
+    fac = _fac_with(store)
+    settled = fac.settle(*_pair(spelling))
+    assert settled["success"] is False
+    assert settled["errorReason"] == "duplicate"
+    # The canonical key was never claimed for a refused duplicate.
+    assert f"nano:live {BLOCK.upper()} req_case" not in store.keys
+
+
+def test_a_store_without_is_claimed_settles_a_new_payment_once():
+    store = ClaimOnlyStore()
+    fac = _fac_with(store)
+    assert fac.settle(*_pair(BLOCK.lower()))["success"] is True
+    assert store.claimed == [
+        f"nano:live {BLOCK.lower()} req_case",
+        f"nano:live {BLOCK.upper()} req_case",
+    ]
+    for spelling in SPELLINGS:
+        assert fac.settle(*_pair(spelling))["errorReason"] == "duplicate"
+
+
+def _raising(key):
+    raise RuntimeError("store down")
+
+
+def _rejects_non_canonical(key):
+    if key != consumption_key(BLOCK, "req_case"):
+        raise ValueError("non-canonical key")
+    return False
+
+
+def _other_signature(key, extra):
+    return False
+
+
+@pytest.mark.parametrize(
+    "is_claimed",
+    [_raising, _rejects_non_canonical, _other_signature, "not callable", 42],
+    ids=["raises", "rejects-non-canonical", "other-signature", "str", "int"],
+)
+@pytest.mark.parametrize("spelling", [BLOCK.lower(), "Ab" * 32], ids=["lower", "mixed"])
+def test_a_broken_is_claimed_refuses_without_raising(is_claimed, spelling):
+    store = ClaimOnlyStore()
+    store.is_claimed = is_claimed
+    fac = _fac_with(store)
+    settled = fac.settle(*_pair(spelling))
+    assert settled["success"] is False
+    assert settled["errorReason"] == "claim_store_error"
+    assert settled["transaction"] == spelling
+    assert store.claimed == []
+
+
+def test_a_broken_is_claimed_does_not_affect_an_upper_case_proof():
+    store = ClaimOnlyStore()
+    store.is_claimed = _raising
+    fac = _fac_with(store)
+    assert fac.settle(*_pair(BLOCK.upper()))["success"] is True
+    assert fac.settle(*_pair(BLOCK.upper()))["errorReason"] == "duplicate"
+
+
+def test_a_claim_store_subclass_overriding_only_claim_still_checks_the_raw_key(tmp_path):
+    path = str(tmp_path / "claims.db")
+    old_key = f"nano:live {BLOCK.lower()} req_case"
+
+    class AuditedStore(ClaimStore):
+        def __init__(self, p):
+            super().__init__(p)
+            self.claimed = []
+
+        def claim(self, key):
+            self.claimed.append(key)
+            return super().claim(key)
+
+    store = AuditedStore(path)
+    # A claim the previous release wrote after this store was opened (so the
+    # open-time migration did not see it).
+    store._conn.execute("INSERT INTO claims VALUES (?, 1.0)", (old_key,))
+    store._conn.commit()
+    fac = _fac_with(store)
+    assert fac.settle(*_pair(BLOCK.lower()))["errorReason"] == "duplicate"
+    assert store.claimed == []
+    assert fac.settle(*_pair(BLOCK.lower(), "req_new"))["success"] is True
+    assert store.claimed == [f"nano:live {BLOCK.upper()} req_new"]
