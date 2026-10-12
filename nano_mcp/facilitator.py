@@ -655,10 +655,11 @@ class Facilitator:
         # with an optional 1-30 digit fraction, or a non-bool int read as raw.
         # This DOES refuse amounts that main accepted: leading/trailing
         # whitespace (" 1", "1\n"), ".5", "1.", fractions over 30 digits, a
-        # float (1.0), a Decimal, bool, sign characters ("+1", "-0.5"),
-        # exponents ("1e3"), "_" separators and non-ASCII digits ("\u0661").
-        # verify_block_on_independent_endpoints also refuses a zero or
-        # negative amount now, where main matched it against the send.
+        # float (1.0), a Decimal, sign characters ("+1", "-0.5"), "_"
+        # separators and non-ASCII digits ("\u0661"). Exponents ("1e3") and
+        # bool were refused here already. verify_block_on_independent_endpoints
+        # now refuses all of these plus a zero or negative amount; main matched
+        # those against the send, or raised ValueError on "1e3" and bool.
         text = amount_text(requirements["amount"])
         if text is None:
             return self._invalid(
