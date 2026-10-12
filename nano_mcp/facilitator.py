@@ -77,6 +77,21 @@ def parse_raw(amount: str) -> int:
     return int(int_part or "0") * 10**30 + int(frac or "0")
 
 
+# The only amount spellings a request may carry: ASCII digits, optionally one
+# "." and 1-30 more digits. parse_raw is not a validator: it hands the parts to
+# int(), which accepts a sign, "_" separators, surrounding whitespace and any
+# Unicode decimal digit, so "-0.5" read as +0.5 XNO (int("-0") is 0), and "+1",
+# "1_000", "1." and Arabic-Indic digits read as amounts too. A JSON number (1.0)
+# reached it through str(). fullmatch, not match + "$": "$" also matches before
+# a trailing newline.
+_AMOUNT_RE = re.compile(r"[0-9]+(\.[0-9]{1,30})?")
+
+
+def is_amount_string(amount: object) -> bool:
+    """True only for a str of ASCII digits with an optional 1-30 digit fraction."""
+    return isinstance(amount, str) and _AMOUNT_RE.fullmatch(amount) is not None
+
+
 @dataclass(frozen=True)
 class NormalizedBlock:
     """Canonical decode of one node's `block_info` response.
@@ -262,6 +277,12 @@ def verify_block_on_independent_endpoints(
     confirmed_sends: list[dict] = []
     failures = 0
     first_reason: str | None = None
+    if not is_amount_string(amount):
+        return VerificationResult(
+            ok=False,
+            consulted=0,
+            reason=f"fail-closed: amount is not a plain Nano amount string: {amount!r}",
+        )
     expected = parse_raw(amount)
 
     for ep in endpoints:
@@ -570,6 +591,17 @@ class Facilitator:
         # both of which were carried all the way to the nodes as the amount to
         # match. Decimal XNO strings ("0.000001") stay valid - parse_raw reads
         # them - so nothing that was quotable before is refused now.
+        # parse_raw is not the gate: it read "-0.5" as +0.5 XNO, so a
+        # requirement for a negative amount verified isValid against a 0.5 XNO
+        # send, and "+1", "1_000", "1.", Arabic-Indic digits and a JSON number
+        # were read as amounts too. Only a str of ASCII digits with an
+        # optional 1-30 digit fraction is an amount here.
+        if not is_amount_string(requirements["amount"]):
+            return self._invalid(
+                "bad-amount",
+                "amount must be a string of digits with an optional fraction of "
+                f"at most 30 digits, got {requirements['amount']!r}",
+            )
         try:
             amount_raw = parse_raw(requirements["amount"])
         except (ValueError, TypeError):
