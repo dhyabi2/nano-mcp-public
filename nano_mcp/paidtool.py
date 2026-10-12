@@ -106,7 +106,15 @@ class PaidToolServer:
         requirements = derive_requirements(
             self._app.master_secret, request_id, self._app.amount_raw, self._app.max_timeout
         )
-        payload = build_payment_payload(requirements, payment_proof)
+        try:
+            payload = build_payment_payload(requirements, payment_proof)
+        except ValueError as err:  # not a 64-hex block hash
+            return {
+                "success": False,
+                "ok": False,
+                "error_reason": "invalid",
+                "error_message": str(err),
+            }
         result = self._app.complete(payload)
         if not result.get("ok"):
             return {

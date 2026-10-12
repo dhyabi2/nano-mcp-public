@@ -28,7 +28,7 @@ NANO_PAYMENT_MASTER_SECRET=$(python3 -c "import os;print(os.urandom(32).hex())")
 # 2. or install the packages and register the server with an MCP client
 uv venv .venv && source .venv/bin/activate
 uv pip install -e ".[dev]"
-python -m pytest -m "not network"        # 313 offline tests collected; 3 journal-plugin modules skip (not in this release)
+python -m pytest -m "not network"        # 426 offline tests collected; 3 journal-plugin modules skip (not in this release)
 
 # 3. installing the package puts the server on PATH as `nano-mcp` -- this is the
 #    command an MCP client config starts, and the one the registry entry means
@@ -98,6 +98,81 @@ uv pip install -e ".[dev]"
 python -m pytest -m "not network"   # offline tests
 python -m pytest                    # includes live rpc.nano.to reads
 ```
+
+## Upgrade notes: payment proofs and the claim store
+
+- Claims are case-insensitive on the block hash. One payment settles once
+  whatever hex case its `paymentProof` is spelt in. The node is asked for the
+  hash as sent, and `transaction` in verify/settle responses echoes it as sent.
+- `consumption_key(block_hash, request_id)` now returns the hash upper-cased
+  (the request_id is unchanged, and stays case-sensitive). `ClaimStore.claim`
+  and `is_claimed` normalise the hash the same way.
+- **Upgrade step for a custom `claim_store`.** `settle` calls its `claim()`
+  exactly once, with the canonical key (hash upper-cased), the same call as
+  before except for the key. It never calls `is_claimed` and never passes the
+  key as sent. Keys your store holds from a previous release are in whatever
+  case the payer sent, so before upgrading add the upper-case form of each
+  one that is not already there (keep the old keys), or a payment settled
+  before the upgrade can be settled once more in upper case. Add only if
+  absent: some keys are already upper case, and two old spellings of one
+  payment share one upper-case key, so a plain insert hits a duplicate and
+  stops part way:
+
+  ```python
+  import re
+  old = re.compile(r"nano:live ([0-9A-Fa-f]{64})\n? (.*)", re.S)
+  for key in list(my_store_keys()):            # every key the store holds
+      m = old.fullmatch(key)
+      if not m:
+          continue
+      new = f"nano:live {m[1].upper()} {m[2]}"
+      if new != key:
+          my_store.claim(new)   # add-if-absent; False only means it is there
+  ```
+
+  In SQL, use `INSERT OR IGNORE` (or your database's equivalent) for the new
+  keys.
+
+  The same applies to a `ClaimStore` subclass that overrides `claim()` or does
+  not run `ClaimStore.__init__` (its own backend): it is treated as a custom
+  store.
+- The built-in `ClaimStore` migrates an existing `claims.db` itself. Every open
+  first runs a cheap read-only check for an old-spelling key that lacks its
+  canonical copy; only if one exists does it take the write lock and add the
+  canonical keys (old rows are kept; `PRAGMA user_version` is not used). This
+  also covers claims a previous release wrote during a rollback. If the file
+  is read-only, or another writer holds the lock, the open still succeeds as
+  long as the directory holding it is writable (on a read-only mount or
+  directory the open fails, as it did before); the store remembers the
+  migration is pending and retries it before its next claim, and while it still
+  cannot run each claim also looks the key up under any older spelling.
+- Settled through the built-in `ClaimStore` (or a subclass that runs
+  `ClaimStore.__init__` and does not override `claim()`), a proof not spelt in
+  upper case is also stored under the key exactly as sent, so a rollback to the
+  previous release still refuses it. Calling `ClaimStore.claim()` directly
+  stores the canonical key only.
+- **Plan the first open after upgrading.** The first open of an old
+  `claims.db` migrates it inside one write transaction, and the time grows with
+  the number of claims: about 1 s per 100,000 and about 13 s for 1,000,000 in
+  our measurements. Disk use for the claims table roughly doubles (one
+  canonical copy per old row; 203 MB became 401 MB for 1,000,000 claims). While
+  it runs, any other process settling against the same file waits the 5 s
+  busy timeout and then fails with `database is locked`. Stop other writers
+  for that first open, or expect those errors. Later opens only read (about
+  0.25 s per 100,000 old rows) and take no write lock.
+- **Do not run the previous release and this one against the same
+  `claims.db` at the same time** (for example during a rolling deploy). A
+  claim the previous release writes after this release opened the file can be
+  settled once more through this release in another spelling, until this
+  release next opens the file. Upgrade every writer together.
+- After a rollback, the previous release behaves as it always did: it refuses
+  the spelling a payment was settled in (this release also stores the key as
+  sent), but it still accepts a spelling neither release wrote, e.g. the same
+  hash in another case.
+- A `paymentProof` with a trailing newline (or any other character outside the
+  64 hex digits) is refused.
+- `PaidToolServer.execute` (`paid_tool_execute`) returns an `invalid` refusal
+  for a malformed proof instead of raising `ValueError`.
 
 ## Address encoding (verified against the node)
 

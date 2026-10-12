@@ -51,7 +51,7 @@ PAYMENT_SIGNATURE_HEADER = "payment-signature"
 PAYMENT_RESPONSE_HEADER = "payment-response"
 
 _X402_VERSION = 2
-_HEX64 = re.compile(r"^[0-9A-Fa-f]{64}$")
+_HEX64 = re.compile(r"[0-9A-Fa-f]{64}")  # fullmatch: "$" admits a trailing "\n"
 
 
 # ---------------------------------------------------------------- wire helpers
@@ -120,7 +120,7 @@ def derive_requirements(
 
 def build_payment_payload(requirements: dict, proof: str, x402_version: int = _X402_VERSION) -> dict:
     """The client-side PaymentPayload presented in the payment-signature header."""
-    if not _HEX64.match(proof):
+    if _HEX64.fullmatch(proof) is None:
         raise ValueError("paymentProof must be a 64-hex Nano block hash")
     return {
         "x402Version": x402_version,
