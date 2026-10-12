@@ -634,24 +634,63 @@ def test_an_honest_first_payment_settles_once_in_any_custom_store(tmp_path, kind
         assert fac.settle(*_pair(other))["errorReason"] == "duplicate"
 
 
+class StrictStore(DictStore):
+    """A store whose plain insert raises on a duplicate (like a UNIQUE key)."""
+
+    def add(self, key):
+        if key in self.keys:
+            raise ValueError(f"UNIQUE constraint failed: {key!r}")
+        self.keys.add(key)
+
+
 def _owner_migration(keys):
-    """The README's upgrade snippet for a custom store: add the upper-case form
-    of every key a previous release wrote (old keys are kept)."""
+    """The README's upgrade snippet for a custom store, run as written: add the
+    upper-case form of each key only if absent (old keys are kept)."""
     import re
 
+    store = StrictStore(keys)
     old = re.compile(r"nano:live ([0-9A-Fa-f]{64})\n? (.*)", re.S)
-    added = set()
-    for key in list(keys):
+    for key in list(store.keys):
         m = old.fullmatch(key)
-        if m:
-            added.add(f"nano:live {m[1].upper()} {m[2]}")
-    return set(keys) | added
+        if not m:
+            continue
+        new = f"nano:live {m[1].upper()} {m[2]}"
+        if new != key:
+            store.claim(new)
+    return store.keys
+
+
+MIGRATION_KEYS = {
+    **OLD_KEYS,
+    f"nano:live {'CD' * 32} already_upper": 700.0,
+    # Two old spellings of one payment: one upper-case key between them.
+    f"nano:live {'cd' * 32} two_spellings": 800.0,
+    f"nano:live {'Cd' * 32} two_spellings": 801.0,
+}
 
 
 def test_the_readme_upgrade_snippet_agrees_with_canonical_key():
     from nano_mcp.facilitator import _canonical_key
 
-    assert _owner_migration(OLD_KEYS) == set(OLD_KEYS) | {_canonical_key(k) for k in OLD_KEYS}
+    expected = set(MIGRATION_KEYS) | {_canonical_key(k) for k in MIGRATION_KEYS}
+    assert _owner_migration(MIGRATION_KEYS) == expected
+
+
+def test_a_plain_insert_of_every_upper_case_key_would_fail_part_way():
+    """Why the snippet adds only if absent."""
+    store = StrictStore(MIGRATION_KEYS)
+    with pytest.raises(ValueError, match="UNIQUE"):
+        for key in sorted(MIGRATION_KEYS):
+            if key.startswith("nano:live ") and len(key) > 74:
+                store.add(f"nano:live {key[10:74].upper()} {key[75:].lstrip()}")
+
+
+def test_the_readme_snippet_is_the_one_tested():
+    from pathlib import Path
+
+    readme = (Path(__file__).resolve().parent.parent / "README.md").read_text()
+    assert "if new != key:" in readme
+    assert "my_store.claim(new)" in readme
 
 
 @pytest.mark.parametrize("spelling", SPELLINGS + ["aB" * 32], ids=["lower", "upper", "mixed", "mixed2"])
