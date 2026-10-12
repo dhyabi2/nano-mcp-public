@@ -49,7 +49,11 @@ from urllib.parse import urlparse
 # RPC endpoint layer (fail-closed multi-endpoint verifier)
 # ---------------------------------------------------------------------------
 
-_HEX64 = re.compile(r"^[0-9A-Fa-f]{64}$")
+# Checked with fullmatch: "$" also matches before a trailing "\n". A valid proof
+# is then upper-cased (_proof_from) before the node call and the claim key: a
+# node looks a hash up case-insensitively, so each case spelling of one block
+# would otherwise get its own claim key and settle the same payment again.
+_HEX64 = re.compile(r"[0-9A-Fa-f]{64}")
 
 NANO_LIVE_NETWORK = "nano:live"
 NANO_ASSET = "XNO"
@@ -454,6 +458,15 @@ class ClaimStore:
         return row is not None
 
 
+def _proof_from(payload: dict) -> tuple[str, bool]:
+    """payload.payload.paymentProof as sent, and whether it is a 64-hex hash.
+    A valid proof comes back upper-cased: the one spelling of that block."""
+    proof = str((payload.get("payload") or {}).get("paymentProof") or "")
+    if _HEX64.fullmatch(proof) is None:
+        return proof, False
+    return proof.upper(), True
+
+
 def consumption_key(block_hash: str, request_id: str) -> str:
     return f"{NANO_LIVE_NETWORK} {block_hash} {request_id}"
 
@@ -499,8 +512,8 @@ class Facilitator:
         req_check = self._check_requirements(requirements, payload)
         if req_check is not None:
             return req_check
-        proof = str((payload.get("payload") or {}).get("paymentProof") or "")
-        if not _HEX64.match(proof):
+        proof, well_formed = _proof_from(payload)
+        if not well_formed:
             return {
                 "isValid": False,
                 "invalidReason": "proof missing",
@@ -531,7 +544,7 @@ class Facilitator:
     def settle(self, requirements: dict, payload: dict) -> dict:
         """Re-run FULL verification (never trust a prior /verify), then bind the
         proof to this request atomically exactly once."""
-        proof = str((payload.get("payload") or {}).get("paymentProof") or "")
+        proof, well_formed = _proof_from(payload)
         req_check = self._check_requirements(requirements, payload)
         if req_check is not None:
             return {
@@ -541,7 +554,7 @@ class Facilitator:
                 "transaction": proof,
                 "network": self.network,
             }
-        if not _HEX64.match(proof):
+        if not well_formed:
             return {
                 "success": False,
                 "errorReason": "invalid",
