@@ -40,6 +40,7 @@ import os
 import re
 import sqlite3
 import threading
+import time
 from dataclasses import dataclass, field
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Callable, Sequence
@@ -455,6 +456,24 @@ LIMIT 1
 """
 
 
+def _enable_wal(conn: sqlite3.Connection, wait_s: float = 5.0) -> None:
+    """Switch to WAL, retrying while another handle holds the file.
+
+    Changing the journal mode can return SQLITE_BUSY at once instead of
+    waiting out busy_timeout, so two stores opening the same file together
+    could fail with 'database is locked'. Retry for up to `wait_s` seconds.
+    """
+    deadline = time.monotonic() + wait_s
+    while True:
+        try:
+            conn.execute("PRAGMA journal_mode=WAL")
+            return
+        except sqlite3.OperationalError as err:
+            if "locked" not in str(err) or time.monotonic() >= deadline:
+                raise
+            time.sleep(0.01)
+
+
 class ClaimStore:
     """Atomic single-use claim keyed by `nano:live <block-hash> <request_id>`.
     INSERT..PRIMARY KEY wins exactly once; a repeat returns False (spent)."""
@@ -469,8 +488,8 @@ class ClaimStore:
         # WAL + busy timeout so a second handle to the same file (e.g. a test or
         # a second facilitator process) does not immediately raise
         # 'database is locked' — same discipline as store.py's read-path fix.
-        self._conn.execute("PRAGMA journal_mode=WAL")
         self._conn.execute("PRAGMA busy_timeout=5000")
+        _enable_wal(self._conn)
         self._conn.executescript(SCHEMA)
         self._conn.commit()
         self._canonicalise_existing_keys()
