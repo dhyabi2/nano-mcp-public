@@ -92,6 +92,36 @@ def is_amount_string(amount: object) -> bool:
     return isinstance(amount, str) and _AMOUNT_RE.fullmatch(amount) is not None
 
 
+def amount_text(amount: object) -> str | None:
+    """The plain spelling of a requirement's amount, or None if it has none.
+
+    A str must already be plain (`is_amount_string`). A Python int - or a JSON
+    integer such as `"amount": 1000` - is raw and reads exactly as `str(int)`;
+    it verified on main and is still accepted. A negative int spells "-..." and
+    is refused by the same pattern as "-1". bool (an int subclass, so True was
+    1 raw), float, Decimal and every other type are refused: str() of them is
+    not a spelling anyone quoted (1.0 -> "1.0" XNO, 1e-06 -> exponent).
+    """
+    if isinstance(amount, bool):
+        return None
+    if isinstance(amount, int):
+        try:
+            amount = str(int(amount))
+        except ValueError:  # more digits than int -> str conversion allows
+            return None
+    return amount if is_amount_string(amount) else None
+
+
+def _show_amount(amount: object) -> str:
+    """repr() for a refusal message, bounded: repr of an int past the digit
+    limit raises ValueError, and a 5000-digit string is not a useful message."""
+    try:
+        shown = repr(amount)
+    except ValueError:
+        return f"<{type(amount).__name__} too large to print>"
+    return shown if len(shown) <= 60 else shown[:57] + "..."
+
+
 @dataclass(frozen=True)
 class NormalizedBlock:
     """Canonical decode of one node's `block_info` response.
@@ -277,13 +307,31 @@ def verify_block_on_independent_endpoints(
     confirmed_sends: list[dict] = []
     failures = 0
     first_reason: str | None = None
-    if not is_amount_string(amount):
+    # Refuse before any node is asked: an amount with no plain spelling, one
+    # parse_raw cannot read ("1" * 5000 matches the pattern but exceeds int()'s
+    # digit limit and raised ValueError out of this function), and a zero
+    # amount, which a 0-raw send would otherwise "confirm" as paid.
+    text = amount_text(amount)
+    if text is None:
         return VerificationResult(
             ok=False,
             consulted=0,
-            reason=f"fail-closed: amount is not a plain Nano amount string: {amount!r}",
+            reason=f"fail-closed: amount is not a plain Nano amount string: {_show_amount(amount)}",
         )
-    expected = parse_raw(amount)
+    try:
+        expected = parse_raw(text)
+    except ValueError:
+        return VerificationResult(
+            ok=False,
+            consulted=0,
+            reason=f"fail-closed: amount is not a readable Nano amount: {_show_amount(text)}",
+        )
+    if expected <= 0:
+        return VerificationResult(
+            ok=False,
+            consulted=0,
+            reason=f"fail-closed: amount must be a positive raw amount, got {_show_amount(amount)}",
+        )
 
     for ep in endpoints:
         try:
@@ -599,30 +647,34 @@ class Facilitator:
         # once more in verify/settle. Refuse here what `parse_raw` cannot read,
         # and refuse a non-positive amount: `""` parsed to 0 and `"-1"` to -1,
         # both of which were carried all the way to the nodes as the amount to
-        # match. Decimal XNO strings ("0.000001") stay valid - parse_raw reads
-        # them - so nothing that was quotable before is refused now.
+        # match. Decimal XNO strings ("0.000001") stay valid.
         # parse_raw is not the gate: it read "-0.5" as +0.5 XNO, so a
         # requirement for a negative amount verified isValid against a 0.5 XNO
-        # send, and "+1", "1_000", "1.", Arabic-Indic digits and a JSON number
-        # were read as amounts too. Only a str of ASCII digits with an
-        # optional 1-30 digit fraction is an amount here.
-        if not is_amount_string(requirements["amount"]):
+        # send, and "+1", "1_000", "1.", Arabic-Indic digits and a JSON float
+        # were read as amounts too. An amount here is a str of ASCII digits
+        # with an optional 1-30 digit fraction, or a non-bool int read as raw.
+        # This DOES refuse amounts that main accepted: leading/trailing
+        # whitespace (" 1", "1\n"), ".5", "1.", fractions over 30 digits, a
+        # float (1.0), a Decimal, bool, sign characters ("+1", "-0.5"),
+        # exponents ("1e3") and "_" separators.
+        text = amount_text(requirements["amount"])
+        if text is None:
             return self._invalid(
                 "bad-amount",
                 "amount must be a string of digits with an optional fraction of "
-                f"at most 30 digits, got {requirements['amount']!r}",
+                f"at most 30 digits, or an integer raw amount, got {_show_amount(requirements['amount'])}",
             )
         try:
-            amount_raw = parse_raw(requirements["amount"])
+            amount_raw = parse_raw(text)
         except (ValueError, TypeError):
             return self._invalid(
                 "bad-amount",
-                f"amount is not a Nano amount: {requirements['amount']!r}",
+                f"amount is not a Nano amount: {_show_amount(text)}",
             )
         if amount_raw <= 0:
             return self._invalid(
                 "bad-amount",
-                f"amount must be a positive raw amount, got {requirements['amount']!r}",
+                f"amount must be a positive raw amount, got {_show_amount(requirements['amount'])}",
             )
         return None
 

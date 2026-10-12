@@ -12,6 +12,9 @@ only thing that can refuse it is the requirements check.
 """
 from __future__ import annotations
 
+import sys
+from decimal import Decimal
+
 import pytest
 
 from nano_mcp.facilitator import (
@@ -128,3 +131,64 @@ def test_zero_is_still_refused_as_before(tmp_path):
     verdict = fac.verify(req, payload)
     assert verdict["isValid"] is False
     assert verdict["invalidReason"] == "bad-amount"
+
+
+# An int amount is raw and verified on main (a Python caller passing 1000, a
+# JSON number posted to /verify, the exported verifier called with 10**30); it
+# is read exactly like str(int). bool is an int subclass and is not an amount.
+@pytest.mark.parametrize("amount", [1000, 10**30], ids=["int-1000", "int-one-xno"])
+def test_an_int_amount_is_raw_and_still_verifies_and_settles(tmp_path, amount):
+    fac = _fac(tmp_path, amount)
+    req, payload = _pair(amount)
+    assert fac.verify(req, payload)["isValid"] is True
+    assert fac.settle(req, payload)["success"] is True
+
+
+@pytest.mark.parametrize("amount", [1000, 10**30], ids=["int-1000", "int-one-xno"])
+def test_the_exported_verifier_reads_an_int_amount_as_raw(amount):
+    res = verify_block_on_independent_endpoints(_endpoints(amount), BLOCK, PAY_TO, amount)
+    assert res.ok is True
+    assert res.confirmed_on == 2
+
+
+NON_STRING_REFUSED = [
+    pytest.param(True, 1, id="bool"),
+    pytest.param(1.0, 10**30, id="float"),
+    pytest.param(Decimal("0.5"), 5 * 10**29, id="decimal"),
+    pytest.param(-1000, 0, id="negative-int"),
+]
+
+
+@pytest.mark.parametrize("amount,sent_raw", NON_STRING_REFUSED)
+def test_a_bool_float_decimal_or_negative_int_amount_is_refused(tmp_path, amount, sent_raw):
+    fac = _fac(tmp_path, sent_raw)
+    req, payload = _pair(amount)
+    verdict = fac.verify(req, payload)
+    assert verdict["isValid"] is False
+    assert verdict["invalidReason"] == "bad-amount"
+    assert fac.settle(req, payload)["success"] is False
+    res = verify_block_on_independent_endpoints(_endpoints(sent_raw), BLOCK, PAY_TO, amount)
+    assert res.ok is False
+    assert res.consulted == 0
+
+
+@pytest.mark.parametrize("amount", ["0", "0.0", "0" * 31], ids=["zero", "zero-decimal", "zeros"])
+def test_the_exported_verifier_refuses_a_zero_amount_against_a_zero_send(amount):
+    # A 0-raw send matches a 0 amount on every node; that is not a payment.
+    res = verify_block_on_independent_endpoints(_endpoints(0), BLOCK, PAY_TO, amount)
+    assert res.ok is False
+    assert res.consulted == 0
+    assert "positive" in res.reason
+
+
+@pytest.mark.parametrize("amount", ["1" * 5000, 10**5000], ids=["long-string", "huge-int"])
+def test_an_amount_past_the_int_digit_limit_is_refused_not_raised(tmp_path, amount):
+    # "1" * 5000 matches the digit pattern, then int() refuses it (digit limit)
+    # with ValueError, which escaped the exported verifier.
+    # (A Python without the limit - before 3.10.7 - reads it as a real amount,
+    # which the 1-raw send then fails to match.)
+    res = verify_block_on_independent_endpoints(_endpoints(1), BLOCK, PAY_TO, amount)
+    assert res.ok is False
+    if hasattr(sys, "get_int_max_str_digits"):
+        assert res.consulted == 0
+        assert len(res.reason) < 200
