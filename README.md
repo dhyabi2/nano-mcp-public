@@ -28,7 +28,7 @@ NANO_PAYMENT_MASTER_SECRET=$(python3 -c "import os;print(os.urandom(32).hex())")
 # 2. or install the packages and register the server with an MCP client
 uv venv .venv && source .venv/bin/activate
 uv pip install -e ".[dev]"
-python -m pytest -m "not network"        # 463 offline tests collected; 3 journal-plugin modules skip (not in this release)
+python -m pytest -m "not network"        # 472 offline tests collected; 3 journal-plugin modules skip (not in this release)
 
 # 3. installing the package puts the server on PATH as `nano-mcp` -- this is the
 #    command an MCP client config starts, and the one the registry entry means
@@ -131,21 +131,44 @@ signed or broadcast.
 
 ### Upgrade note: representatives on send and receive
 
-Earlier versions re-delegated the account on every block: `RpcClient.account_info`
-did not ask the node for the representative, so `Wallet.send` and `Wallet.receive`
-always signed `DEFAULT_REPRESENTATIVE` and `SessionWallet.send` always signed the
-sub-account's own address. Now:
+With the stock `RpcClient`, earlier versions re-delegated the account on every
+block: `RpcClient.account_info` did not ask the node for the representative, so
+the node never sent one, and `Wallet.send` and `Wallet.receive` signed
+`Wallet.representative` -- with the default field, `DEFAULT_REPRESENTATIVE` --
+while `SessionWallet.send` signed the sub-account's own address. Now:
 
-- `RpcClient.account_info` sends `representative=true`, and its result has a
-  `representative` key (for an opened account).
+- **The meaning of an explicit `Wallet(representative=X)` changed.** The previous
+  release signed `info.get("representative") or self.representative`, so X was a
+  *fallback*, used only when the node's answer carried no representative. With
+  the stock `RpcClient` the node never sent one, so X was in practice signed
+  every time; but a custom `ClientLike`, an `RpcClient` subclass or a proxy that
+  did return the representative saw the node's value win over X. Now any
+  non-`None` `Wallet.representative` is signed into every send and receive,
+  re-delegating the account to X even when the node reports a different
+  representative. If you passed X meaning "only for opening new accounts", leave
+  `representative` as `None`: an account with no representative still gets
+  `DEFAULT_REPRESENTATIVE`, and every other account keeps its own.
 - Sends and receives keep the account's current representative unless one is
   passed explicitly. Code that relied on `Wallet()` re-pointing accounts at
   `DEFAULT_REPRESENTATIVE` should pass `representative=DEFAULT_REPRESENTATIVE`.
-- `Wallet.representative` now defaults to `None` and is kept exactly as given,
-  so a wallet built without one reads `None` there (it used to read
-  `DEFAULT_REPRESENTATIVE`). Code that read the attribute to learn which
+- `Wallet.representative` is now `str | None` and defaults to `None`. It is kept
+  exactly as given, so a wallet built without one reads `None` there (it used to
+  read `DEFAULT_REPRESENTATIVE`). Code that read the attribute to learn which
   representative a block would sign should treat `None` as "the account's
   current one".
+- `RpcClient.account_info` now sends `"representative": "true"` in the request
+  body, and its result has a `representative` key (for an opened account). HTTP
+  mocks that match the exact `account_info` request body need updating.
+- Exceptions changed:
+  - An invalid explicit representative (for example `""` or `"bogus"`) now raises
+    `ValueError` on every `Wallet.send` and `Wallet.receive`, right after the
+    `account_info` read and before `work_generate` is requested or anything is
+    signed or broadcast.
+  - A node answer whose representative is not a string, or not a checksum-valid
+    `nano_` address, now raises `RpcError` before `work_generate` is requested.
+    It used to raise `ValueError`, after `work_generate` had already run. Callers
+    that catch `ValueError` around `send` or `receive` should also catch
+    `RpcError`.
 
 ## Upgrade notes: payment proofs and the claim store
 

@@ -34,6 +34,8 @@ DEST = "nano_1q3hqecaw15cjt7thbtxu3pbzr1eihtzzpzxguoc37bj1wc5ffoh7w74gi6p"
 # the account's own address, so whichever fallback is taken is visible.
 CHOSEN_REP = "nano_3patrick68y5btibaujyu7zokw7ctu4onikarddphra6qt688xzrszcg4yuo"
 FRONTIER = "AB" * 32
+SOURCE_HASH = "EF" * 32
+RECEIVE_AMOUNT_RAW = 10**27
 
 
 class FaithfulNode:
@@ -70,6 +72,9 @@ class FaithfulNode:
             if self.rep is not None and str(payload.get("representative", "")).lower() == "true":
                 body["representative"] = self.rep
             return httpx.Response(200, json=body)
+        if action == "block_info":
+            # The source send a `Wallet.receive` pockets.
+            return httpx.Response(200, json={"amount": str(RECEIVE_AMOUNT_RAW)})
         if action == "work_generate":
             return httpx.Response(200, json={"work": "0000000000000000"})
         if action == "process":
@@ -389,3 +394,50 @@ def test_equality_treats_representative_as_a_plain_field():
         seed=SEED, client=c, representative=DEFAULT_REP)
     # "keep the account's" and "re-delegate to the default" are different wallets.
     assert Wallet(seed=SEED, client=c) != Wallet(seed=SEED, client=c, representative=DEFAULT_REP)
+
+
+# -- a receive carries the representative the same way a send does -----------
+#
+# `Wallet.receive` builds its block from the same `account_info` read, so it
+# had the same re-delegation and takes the same decision.
+
+def _receive_with(wallet) -> str:
+    _, blk = wallet.receive(SOURCE_HASH)
+    return blk["representative"]
+
+
+def test_a_receive_keeps_the_accounts_own_representative(node):
+    n = node(int(nano_to_raw("0.005")))
+    w = Wallet(seed=SEED, client=_client())
+    assert _receive_with(w) == CHOSEN_REP, "the receive re-delegated the account"
+    assert n.sent("process")["block"]["representative"] == CHOSEN_REP
+    assert n.sent("process")["subtype"] == "receive"
+
+
+def test_a_receive_into_an_account_with_no_representative_takes_the_default(node):
+    from nano_sdk.wallet import DEFAULT_REPRESENTATIVE
+
+    node(int(nano_to_raw("0.005")), rep=None)
+    w = Wallet(seed=SEED, client=_client())
+    assert _receive_with(w) == DEFAULT_REPRESENTATIVE
+
+
+def test_a_receive_with_an_explicit_representative_signs_it(node):
+    n = node(int(nano_to_raw("0.005")))
+    w = Wallet(seed=SEED, client=_client(), representative=THIRD_REP)
+    assert _receive_with(w) == THIRD_REP
+    assert n.sent("process")["block"]["representative"] == THIRD_REP
+
+
+@pytest.mark.parametrize("bad", BAD_NODE_REPS)
+def test_a_malformed_node_representative_fails_a_receive_before_work(node, bad):
+    from nano_sdk.client import RpcError
+
+    n = node(int(nano_to_raw("0.005")), rep=bad)
+    w = Wallet(seed=SEED, client=_client())
+    with pytest.raises(RpcError):
+        w.receive(SOURCE_HASH)
+    actions = [p.get("action") for p in n.payloads]
+    assert "work_generate" not in actions and "process" not in actions, (
+        f"requested after a bad reply: {actions}"
+    )
