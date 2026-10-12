@@ -516,7 +516,8 @@ class Facilitator:
             }
 
         # 2. Atomic single-use claim (exactly-one-wins, replay-safe).
-        request_id = str(requirements.get("extra", {}).get("requestId") or "")
+        # `extra` is absent, null or an object here (_check_requirements).
+        request_id = str((requirements.get("extra") or {}).get("requestId") or "")
         key = consumption_key(proof, request_id)
         if not self.claim_store.claim(key):
             return {
@@ -564,6 +565,15 @@ class Facilitator:
             return self._invalid("bad-amount", "amount mismatch between requirements and accepted")
         if requirements.get("payTo") != accepted.get("payTo"):
             return self._invalid("bad-payto", "payTo mismatch between requirements and accepted")
+        # settle() reads `extra.requestId` to bind the claim, AFTER the on-chain
+        # re-verify. `requirements.get("extra", {})` is only `{}` when the key is
+        # absent: `"extra": null` or `"extra": "abc"` reached `.get` on a None or
+        # a str, raised AttributeError, and the paid request could never be
+        # settled - the connection closed with no verdict. Null reads as absent;
+        # anything else that is not an object is refused here, before any node.
+        extra = requirements.get("extra")
+        if extra is not None and not isinstance(extra, dict):
+            return self._invalid("bad-requirements", "requirements.extra must be a JSON object")
 
         # REQUIRED_SECTIONS was declared and never enforced, and the two checks
         # above compare requirements to `accepted` rather than to anything: a
