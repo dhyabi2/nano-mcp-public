@@ -49,10 +49,11 @@ from urllib.parse import urlparse
 # RPC endpoint layer (fail-closed multi-endpoint verifier)
 # ---------------------------------------------------------------------------
 
-# Checked with fullmatch: "$" also matches before a trailing "\n". A valid proof
-# is then upper-cased (_proof_from) before the node call and the claim key: a
-# node looks a hash up case-insensitively, so each case spelling of one block
-# would otherwise get its own claim key and settle the same payment again.
+# Checked with fullmatch: "$" also matches before a trailing "\n". A node looks
+# a hash up case-insensitively, so the claim key upper-cases the hash
+# (consumption_key / _canonical_key): otherwise each case spelling of one block
+# would get its own claim key and settle the same payment again. The proof
+# itself is passed to the node and echoed back exactly as the caller sent it.
 _HEX64 = re.compile(r"[0-9A-Fa-f]{64}")
 
 NANO_LIVE_NETWORK = "nano:live"
@@ -431,6 +432,49 @@ class ClaimStore:
         self._conn.execute("PRAGMA busy_timeout=5000")
         self._conn.executescript(SCHEMA)
         self._conn.commit()
+        self._canonicalise_existing_keys()
+
+    def _canonicalise_existing_keys(self) -> None:
+        """Give every claim stored under an older key spelling its canonical key.
+
+        Keys used to carry the block hash exactly as the caller sent it (any hex
+        case, and `<hash>\n` passed the old `^...$` check). Claims now look up
+        the upper-case spelling only, so without this a payment settled before
+        the upgrade would settle once more. For each stored key whose canonical
+        form is missing, the canonical key is inserted with the original
+        claimed_at. The old row is kept: nothing looks it up any more, and
+        keeping it leaves the file valid for the previous release too.
+
+        Runs on every open and is idempotent: INSERT OR IGNORE inside one
+        IMMEDIATE transaction, so concurrent openers cannot double-insert or
+        clobber a claim, and an already-migrated file does no write at all.
+        Keys that do not parse as `nano:live <64-hex> <request_id>` are left
+        untouched.
+        """
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT consumption_key, claimed_at FROM claims"
+            ).fetchall()
+            present = {key for key, _ in rows}
+            missing: dict[str, float] = {}
+            for key, claimed_at in rows:
+                canonical = _canonical_key(key)
+                if canonical == key or canonical in present:
+                    continue
+                if canonical not in missing or claimed_at < missing[canonical]:
+                    missing[canonical] = claimed_at
+            if not missing:
+                return
+            try:
+                self._conn.execute("BEGIN IMMEDIATE")
+                self._conn.executemany(
+                    "INSERT OR IGNORE INTO claims (consumption_key, claimed_at) VALUES (?,?)",
+                    sorted(missing.items()),
+                )
+                self._conn.commit()
+            except BaseException:
+                self._conn.rollback()
+                raise
 
     def claim(self, consumption_key: str) -> bool:
         with self._lock:
@@ -439,7 +483,7 @@ class ClaimStore:
 
                 self._conn.execute(
                     "INSERT INTO claims (consumption_key, claimed_at) VALUES (?,?)",
-                    (consumption_key, time.time()),
+                    (_canonical_key(consumption_key), time.time()),
                 )
                 self._conn.commit()
                 return True
@@ -453,22 +497,45 @@ class ClaimStore:
     def is_claimed(self, consumption_key: str) -> bool:
         with self._lock:
             row = self._conn.execute(
-                "SELECT 1 FROM claims WHERE consumption_key=?", (consumption_key,)
+                "SELECT 1 FROM claims WHERE consumption_key=?",
+                (_canonical_key(consumption_key),),
             ).fetchone()
         return row is not None
 
 
 def _proof_from(payload: dict) -> tuple[str, bool]:
-    """payload.payload.paymentProof as sent, and whether it is a 64-hex hash.
-    A valid proof comes back upper-cased: the one spelling of that block."""
+    """payload.payload.paymentProof exactly as sent, and whether it is a 64-hex
+    hash. The case is not changed here: the node gets, and the caller gets back,
+    the spelling the caller used; only the claim key is case-normalised."""
     proof = str((payload.get("payload") or {}).get("paymentProof") or "")
-    if _HEX64.fullmatch(proof) is None:
-        return proof, False
-    return proof.upper(), True
+    return proof, _HEX64.fullmatch(proof) is not None
+
+
+_KEY_PREFIX = f"{NANO_LIVE_NETWORK} "
+
+
+def _canonical_key(key: str) -> str:
+    """`nano:live <hash> <request_id>` with the hash upper-cased (and a trailing
+    "\n" on the hash, which the old check let through, dropped). The
+    request_id is case-sensitive and kept byte for byte. A key that does not
+    have that shape is returned unchanged."""
+    if not key.startswith(_KEY_PREFIX):
+        return key
+    rest = key[len(_KEY_PREFIX):]
+    block_hash, tail = rest[:64], rest[64:]
+    if _HEX64.fullmatch(block_hash) is None:
+        return key
+    if tail.startswith("\n "):
+        tail = tail[1:]
+    if not tail.startswith(" "):
+        return key
+    return _KEY_PREFIX + block_hash.upper() + tail
 
 
 def consumption_key(block_hash: str, request_id: str) -> str:
-    return f"{NANO_LIVE_NETWORK} {block_hash} {request_id}"
+    """The single-use claim key for a block hash and request. The hash is
+    upper-cased, so every hex-case spelling of one block names one key."""
+    return _canonical_key(f"{_KEY_PREFIX}{block_hash} {request_id}")
 
 
 # ---------------------------------------------------------------------------
