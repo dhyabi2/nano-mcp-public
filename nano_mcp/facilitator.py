@@ -610,11 +610,18 @@ class ClaimStore:
         return row is not None
 
 
-def _proof_from(payload: dict) -> tuple[str, bool]:
+def _proof_from(payload: object) -> tuple[str, bool]:
     """payload.payload.paymentProof exactly as sent, and whether it is a 64-hex
     hash. The case is not changed here: the node gets, and the caller gets back,
-    the spelling the caller used; only the claim key is case-normalised."""
-    proof = str((payload.get("payload") or {}).get("paymentProof") or "")
+    the spelling the caller used; only the claim key is case-normalised.
+
+    "" when either object is not one: settle() reports the proof in a refusal
+    too, so this has to be safe on a payload `_check_requirements` has just
+    refused (`payload: [1]` used to raise AttributeError here)."""
+    inner = payload.get("payload") if isinstance(payload, dict) else None
+    if not isinstance(inner, dict):
+        return "", False
+    proof = str(inner.get("paymentProof") or "")
     return proof, _HEX64.fullmatch(proof) is not None
 
 
@@ -718,8 +725,11 @@ class Facilitator:
     def settle(self, requirements: dict, payload: dict) -> dict:
         """Re-run FULL verification (never trust a prior /verify), then bind the
         proof to this request atomically exactly once."""
-        proof, well_formed = _proof_from(payload)
+        # The proof is read AFTER the check. It used to be the first line, so
+        # `payload: [1]` raised AttributeError here before _check_requirements
+        # could refuse it, and /settle closed the connection with no verdict.
         req_check = self._check_requirements(requirements, payload)
+        proof, well_formed = _proof_from(payload)
         if req_check is not None:
             return {
                 "success": False,
@@ -808,6 +818,10 @@ class Facilitator:
         accepted = payload.get("accepted") or {}
         if not isinstance(accepted, dict):
             return self._invalid("bad-request", "payload.accepted must be a JSON object")
+        # The proof is read off `payload.payload`. `"x"`, `1` or `[1]` there
+        # reached `.get` and raised AttributeError in both verify and settle.
+        if not isinstance(payload.get("payload") or {}, dict):
+            return self._invalid("bad-request", "payload.payload must be a JSON object")
         if requirements.get("scheme") != self.scheme:
             return self._invalid("bad-scheme", "scheme must be exact")
         if (
@@ -891,6 +905,13 @@ class Facilitator:
                 f"amount must be a positive raw amount, got {_show_amount(requirements['amount'])}",
             )
         return None
+
+    @staticmethod
+    def _proof_of(payload: object) -> str:
+        """`payload.payload.paymentProof` as a str, or "" when either object is
+        not one. settle() reports the proof in a refusal too, so this has to be
+        safe on a payload that _check_requirements has just refused."""
+        return _proof_from(payload)[0]
 
     @staticmethod
     def _invalid(reason: str, message: str) -> dict:

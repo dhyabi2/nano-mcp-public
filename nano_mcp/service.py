@@ -183,6 +183,10 @@ class PaymentService:
           {"status": "pending", ...}
               if no matching on-chain send is seen yet.
         """
+        # Every on-chain receive is at least 0 raw, so a negative amount would
+        # be satisfied by any payment at all to this address.
+        if isinstance(amount_raw, bool) or not isinstance(amount_raw, int) or amount_raw < 0:
+            raise ValueError(f"amount_raw must be a non-negative int of raw, got {amount_raw!r}")
         acct = self.one_time_account(request_id)
         # exactly-once: previous approval wins, always.
         existing = self.store.get(request_id)

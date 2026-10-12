@@ -46,6 +46,20 @@ def _configurable(fn):
     return wrapper
 
 
+def _raw_amount(amount_raw: str) -> int:
+    """`amount_raw` as a whole number of raw, refused unless it is ASCII digits.
+
+    `int()` reads "-1", "+1", " 1", "1_000" and non-ASCII digits. verify_payment
+    approves a receive of at least this amount, so for a request_id with no
+    recorded quote "-1" was satisfied by any receive of any size.
+    """
+    if not (isinstance(amount_raw, str) and amount_raw.isascii() and amount_raw.isdigit()):
+        raise ToolError(
+            f"amount_raw must be a whole number of raw in ASCII digits, got {amount_raw!r}"
+        )
+    return int(amount_raw)
+
+
 def server_from_env(
     master_secret: bytes | None = None,
     client: RpcClient | None = None,
@@ -139,7 +153,7 @@ def build_server(pay: PaymentService, title: str = "nano-mcp pay-per-call") -> M
         tool surface the caller is the payer, and a payer that can pass
         require_onchain=false is approved with tx_hash "simulated" without any
         payment at all."""
-        return srv.verify_payment(request_id, int(amount_raw), require_onchain=True)
+        return srv.verify_payment(request_id, _raw_amount(amount_raw), require_onchain=True)
 
     @server.tool()
     @_configurable
@@ -148,7 +162,7 @@ def build_server(pay: PaymentService, title: str = "nano-mcp pay-per-call") -> M
         `tool` after verify. NOTE: broadcast is not executed here in tests (no funded
         wallet); this returns the target so a host calling the server can send via the
         SDK wallet (Wallet.send) then verify."""
-        q = srv.quote(price_raw=int(amount_raw), request_id=request_id)
+        q = srv.quote(price_raw=_raw_amount(amount_raw), request_id=request_id)
         return {
             "request_id": request_id,
             "pay_to": q.address,
