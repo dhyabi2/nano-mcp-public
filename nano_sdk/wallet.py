@@ -17,7 +17,7 @@ from dataclasses import dataclass, field
 from typing import Protocol
 
 from . import block as blockmod
-from .client import RpcClient
+from .client import RpcClient, representative_from_info
 from .crypto import Account, derive_account, validate_address
 from .units import nano_to_raw
 
@@ -54,10 +54,32 @@ class Wallet:
     seed: bytes | str = field(repr=False)
     client: ClientLike = field(default_factory=RpcClient)
     daily_cap_raw: int = DEFAULT_DAILY_CAP_RAW
-    representative: str = DEFAULT_REPRESENTATIVE
+    # None (the default) means "keep whatever representative the account already
+    # has": a send or a receive carries the node-reported representative into the
+    # block, and only an account with none (unopened, or a blank answer) gets
+    # DEFAULT_REPRESENTATIVE. Any address here -- passed to the constructor or
+    # assigned later, DEFAULT_REPRESENTATIVE included -- is an explicit choice
+    # and every block signs it, re-delegating the account to it. The value is
+    # kept exactly as given, so a wallet built without one reads None here.
+    representative: str | None = None
     # Per-wallet rolling spend tracker: daytime-epoch -> raw sent that day.
     _spend: dict[int, int] = field(default_factory=dict)
     _day: int = field(default_factory=lambda: int(time.time()) // 86400)
+
+    def _block_representative(self, info: dict) -> str:
+        """The representative a block this wallet signs carries.
+
+        `self.representative` set (not None): validated (ValueError if it is not
+        a valid nano_ address) and used. None: the representative the node
+        reports for the account, validated (RpcError if malformed), falling back
+        to DEFAULT_REPRESENTATIVE when the node reports none.
+        """
+        if self.representative is not None:
+            rep = self.representative
+            if not validate_address(rep):
+                raise ValueError(f"representative is not a valid nano_ address: {rep!r}")
+            return rep
+        return representative_from_info(info) or DEFAULT_REPRESENTATIVE
 
     def account(self, index: int = 0) -> Account:
         return derive_account(self.seed, index)
@@ -152,7 +174,11 @@ class Wallet:
         raw_balance = int(info.get("balance", "0"))
         frontier_hex = info.get("frontier") or "0" * 64
         frontier = bytes.fromhex(frontier_hex)  # 32 raw bytes
-        rep = info.get("representative") or self.representative
+        # Decided (and the node's answer validated) here, before work_generate is
+        # requested or anything is signed. The node omits the key for an
+        # unopened account, and a blank answer falls back rather than reaching
+        # `public_key_from_address`; see `_block_representative`.
+        rep = self._block_representative(info)
         frontier_ascii = frontier_hex.encode()  # hex string for work_generate
 
         self.check_send(amount_raw, raw_balance)
@@ -216,7 +242,11 @@ class Wallet:
         raw_balance = int(info.get("balance", "0"))
         frontier_hex = info.get("frontier") or "0" * 64
         frontier = bytes.fromhex(frontier_hex)
-        rep = info.get("representative") or self.representative
+        # Decided (and the node's answer validated) here, before work_generate is
+        # requested or anything is signed. The node omits the key for an
+        # unopened account, and a blank answer falls back rather than reaching
+        # `public_key_from_address`; see `_block_representative`.
+        rep = self._block_representative(info)
 
         # The amount received is the amount of the source send block.
         src = self.client.block_info(source_block_hash)

@@ -35,7 +35,7 @@ from decimal import Decimal
 import ed25519_blake2b
 
 from . import block as blockmod
-from .client import RpcClient
+from .client import RpcClient, representative_from_info
 from .crypto import (
     Account,
     address_from_public_key,
@@ -295,7 +295,12 @@ class SessionWallet:
 
         frontier_hex = info.get("frontier") or "0" * 64
         frontier = bytes.fromhex(frontier_hex)
-        rep = info.get("representative", self.account.address)
+        # Keep the sub-account's current representative. Without the flag that
+        # `client.account_info` now sets, this read never found one and every
+        # session send re-delegated the sub-account to itself. The node's answer
+        # is validated (RpcError if malformed) before work_generate; a missing
+        # or blank one falls back rather than reaching public_key_from_address.
+        rep = representative_from_info(info) or self.account.address
         frontier_ascii = frontier_hex.encode()
 
         if work is None:
