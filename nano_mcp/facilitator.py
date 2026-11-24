@@ -370,6 +370,32 @@ def verify_block_on_independent_endpoints(
                 raise RpcError(
                     f"block pays {nb.destination}, not payTo={pay_to} on {ep.url}"
                 )
+            # The payer is reported as verified fact - /verify and /settle both
+            # answer `payer`, and `evidence.append_nano_tx` writes it into the
+            # journal the scorecard counts external receipts from - but it was
+            # the one field no endpoint had to agree on. It is read off the
+            # FIRST endpoint's reply below and never compared, so two nodes
+            # returning the same confirmed send of the right amount to the
+            # right payee could name different senders and the facilitator
+            # published one of them, having been told by one node only. That
+            # is the single-RPC trust this function exists to remove (L1).
+            #
+            # A blank is refused for the same reason the empty payee above is:
+            # a sender this code could not read is a sender it cannot vouch
+            # for, and a node that omits `block_account` otherwise yielded
+            # `"payer": ""` on an isValid verdict. A real node always carries
+            # it (tests/test_facilitator_real_node_shape.py pins the shape).
+            if not nb.account:
+                raise RpcError(
+                    f"block_info on {ep.url} carries no payer account, so it cannot "
+                    f"prove who paid; refusing rather than reporting a blank payer"
+                )
+            if confirmed_sends and nb.account != confirmed_sends[0]["payer"]:
+                raise RpcError(
+                    f"block is paid by {nb.account} on {ep.url} but by "
+                    f"{confirmed_sends[0]['payer']} on {endpoints[0].url}; the "
+                    f"endpoints disagree about who paid"
+                )
 
             confirmed_sends.append(
                 {
